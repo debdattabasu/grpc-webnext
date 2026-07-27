@@ -1,12 +1,13 @@
 //! The grpc-webnext conformance runner (TS client driver).
 //!
 //! Loads the language-neutral cases in `conformance/cases/*.yaml` and drives each one
-//! against the Rust `conformance-server` (which serves `ConformanceService` over
-//! grpc-webnext) under every applicable transport profile — the h2ts binary path, the
-//! custom `Frame` binary path, and the JSON custom path — asserting the observed wire
-//! behavior. This is the cross-implementation anti-drift guard, exercised over the real wire.
+//! against **every** server implementation — the Rust and Go `conformance-server`s, which
+//! each serve `ConformanceService` over grpc-webnext — under every applicable transport
+//! profile: the h2ts binary path, the custom `Frame` binary path, and the JSON custom
+//! path. That `{server impls} × {cases} × {transports} × {codecs}` matrix is the
+//! cross-implementation anti-drift guard, exercised over the real wire.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,6 +27,7 @@ import type { StatusResult } from "../src/transport.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../../..");
 const rustRoot = path.join(repoRoot, "rust");
+const goRoot = path.join(repoRoot, "go");
 const casesDir = path.join(repoRoot, "conformance", "cases");
 const wsImpl = WebSocket as unknown as typeof globalThis.WebSocket;
 
@@ -298,6 +300,38 @@ function assertCase(c: Case, r: Result) {
   if (c.expect.trailers_contain) assertMetaContains(r.status.metadata, c.expect.trailers_contain);
 }
 
+// --- server implementations under test -----------------------------------------------------
+/**
+ * Each entry is one grpc-webnext server implementation. `prepare` builds it once (so a cold
+ * compile never eats into a per-server startup budget) and `command` is spawned per config
+ * profile. Both are launched directly rather than through a build tool's `run` wrapper, so
+ * killing the process actually kills the server rather than orphaning a grandchild.
+ */
+interface ServerImpl {
+  name: string;
+  prepare(): void;
+  command: () => { file: string; args: string[]; cwd: string };
+}
+
+const goBinary = path.join(goRoot, "target", "conformance-server");
+
+const SERVERS: ServerImpl[] = [
+  {
+    name: "rust",
+    prepare: () => execFileSync("cargo", ["build", "--quiet", "-p", "conformance-server"], { cwd: rustRoot }),
+    command: () => ({
+      file: "cargo",
+      args: ["run", "--quiet", "-p", "conformance-server"],
+      cwd: rustRoot,
+    }),
+  },
+  {
+    name: "go",
+    prepare: () => execFileSync("go", ["build", "-o", goBinary, "./examples/conformance-server"], { cwd: goRoot }),
+    command: () => ({ file: goBinary, args: [], cwd: goRoot }),
+  },
+];
+
 // --- harness -----------------------------------------------------------------------------
 const suites: Suite[] = fs
   .readdirSync(casesDir)
@@ -308,11 +342,14 @@ const suites: Suite[] = fs
 const serverProfiles = new Map<string, Record<string, string>>();
 for (const s of suites) for (const c of s.cases) serverProfiles.set(requiresKey(c.requires), requiresEnv(c.requires));
 
+/** Keyed by `<impl>|<config profile>` — one running server per combination. */
 const servers = new Map<string, { proc: ChildProcess; baseUrl: string }>();
+const serverKey = (impl: string, requires: Case["requires"]) => `${impl}|${requiresKey(requires)}`;
 
-function spawnServer(env: Record<string, string>): Promise<{ proc: ChildProcess; baseUrl: string }> {
-  const proc = spawn("cargo", ["run", "--quiet", "-p", "conformance-server"], {
-    cwd: rustRoot,
+function spawnServer(impl: ServerImpl, env: Record<string, string>): Promise<{ proc: ChildProcess; baseUrl: string }> {
+  const { file, args, cwd } = impl.command();
+  const proc = spawn(file, args, {
+    cwd,
     stdio: ["ignore", "pipe", "inherit"],
     env: { ...process.env, ...env },
   });
@@ -322,38 +359,46 @@ function spawnServer(env: Record<string, string>): Promise<{ proc: ChildProcess;
       const m = line.match(/^LISTENING (\S+)$/);
       if (m) resolve({ proc, baseUrl: m[1] });
     });
-    proc.on("exit", (code) => reject(new Error(`conformance-server exited early: ${code}`)));
+    proc.on("error", (e) => reject(new Error(`${impl.name} conformance-server failed to start: ${e.message}`)));
+    proc.on("exit", (code) => reject(new Error(`${impl.name} conformance-server exited early: ${code}`)));
   });
 }
 
 beforeAll(async () => {
+  for (const impl of SERVERS) impl.prepare();
   await Promise.all(
-    [...serverProfiles].map(async ([key, env]) => servers.set(key, await spawnServer(env))),
+    SERVERS.flatMap((impl) =>
+      [...serverProfiles].map(async ([key, env]) =>
+        servers.set(`${impl.name}|${key}`, await spawnServer(impl, env)),
+      ),
+    ),
   );
-}, 120_000);
+}, 300_000);
 
 afterAll(() => {
   for (const { proc } of servers.values()) proc.kill("SIGKILL");
 });
 
-for (const suite of suites) {
-  describe(`conformance: ${suite.suite}`, () => {
-    for (const c of suite.cases) {
-      for (const profile of profilesFor(c)) {
-        it(`${c.name} [${profile.name}]`, async () => {
-          const server = servers.get(requiresKey(c.requires))!;
-          const client = makeClient(ConformanceServiceDefinition, {
-            baseUrl: server.baseUrl,
-            webSocketImpl: wsImpl,
-            ...profile.config,
+for (const impl of SERVERS) {
+  for (const suite of suites) {
+    describe(`conformance: ${suite.suite} [${impl.name} server]`, () => {
+      for (const c of suite.cases) {
+        for (const profile of profilesFor(c)) {
+          it(`${c.name} [${profile.name}]`, async () => {
+            const server = servers.get(serverKey(impl.name, c.requires))!;
+            const client = makeClient(ConformanceServiceDefinition, {
+              baseUrl: server.baseUrl,
+              webSocketImpl: wsImpl,
+              ...profile.config,
+            });
+            try {
+              assertCase(c, await runCase(client, c));
+            } finally {
+              client.close();
+            }
           });
-          try {
-            assertCase(c, await runCase(client, c));
-          } finally {
-            client.close();
-          }
-        });
+        }
       }
-    }
-  });
+    });
+  }
 }

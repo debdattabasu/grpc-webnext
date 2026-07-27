@@ -76,3 +76,30 @@ cases:
           request_headers_contain:
             - { key: "x-ascii", ascii: "plain" }
             - { key: "x-blob-bin", b64: "AQIDBA==" }
+
+  # The same fidelity over the WebSocket surface, which reaches the server by a
+  # completely different route: metadata rides in the `Subscribe` frame as protobuf
+  # `Metadatum`s (binary values as RAW BYTES) rather than as base64 HTTP headers, so
+  # it is the server that must re-encode them on the way into the RPC. The unary case
+  # above cannot cover this — a unary call takes the Fetch path on every profile — so
+  # without a streaming case the whole frame-metadata path goes unproven. The payload
+  # is deliberately non-printable, which is exactly what a naive header conversion
+  # silently drops.
+  - name: metadata-roundtrip-websocket
+    rpc: ServerStream
+    transports: [websocket]
+    codecs: [proto]
+    request_metadata:
+      - { key: "x-ascii", ascii: "plain" }
+      - { key: "x-blob-bin", b64: "AQIDBA==" }
+    request:
+      response_definition:
+        stream_messages:
+          - { payload: { text: "a" } }
+    expect:
+      status: { code: 0 }
+      messages:
+        - request_info:
+            request_headers_contain:
+              - { key: "x-ascii", ascii: "plain" }
+              - { key: "x-blob-bin", b64: "AQIDBA==" }
