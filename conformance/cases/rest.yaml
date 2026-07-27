@@ -266,3 +266,115 @@ cases:
       content_type: grpc-webnext+proto
     expect:
       status: { code: 9 }
+
+  # --- many request messages on one annotated route ----------------------------
+  #
+  # Everything above sends at most ONE request message, which a `body: "*"` route
+  # can express as a single JSON document. These use `bodies:` — the first opens
+  # the stream, the rest follow as message frames — and are the only cases that
+  # prove an annotated URL is a real bidirectional stream rather than a fancy POST.
+
+  # Bidi over REST: three requests in, three echoes out, in order.
+  - name: bidi-multi-message
+    rpc: BidiStream
+    rest:
+      verb: POST
+      path: /v1/bidi-stream
+      bodies:
+        - '{"payload":"YQ=="}'
+        - '{"payload":"Yg=="}'
+        - '{"payload":"Yw=="}'
+    expect:
+      status: { code: 0 }
+      message_count: 3
+      messages:
+        - payload: { text: "a" }
+        - payload: { text: "b" }
+        - payload: { text: "c" }
+
+  # The ResponseDefinition on the FIRST request still governs the terminal status,
+  # exactly as on the main surface — the messages all arrive, then the error.
+  - name: bidi-multi-message-error
+    rpc: BidiStream
+    rest:
+      verb: POST
+      path: /v1/bidi-stream
+      bodies:
+        - '{"payload":"YQ==","responseDefinition":{"statusCode":9,"statusMessage":"after"}}'
+        - '{"payload":"Yg=="}'
+    expect:
+      status: { code: 9, message_contains: "after" }
+      message_count: 2
+
+  # Client streaming over REST: several requests, ONE response. Its annotation URL
+  # is a WebSocket, not a Fetch endpoint — client streaming is a stream that
+  # happens to answer once, and routing it to Fetch would be the easy mistake.
+  # `receivedCount` in the reply is what proves every message actually landed.
+  - name: client-stream-multi-message
+    rpc: ClientStream
+    rest:
+      verb: POST
+      path: /v1/client-stream
+      bodies:
+        - '{"payload":"YQ==","responseDefinition":{"payload":"ZG9uZQ=="}}'
+        - '{"payload":"Yg=="}'
+        - '{"payload":"Yw=="}'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "done" }
+      received_count: 3
+
+  # A single-message client stream still has to half-close cleanly rather than hang
+  # waiting for more.
+  - name: client-stream-single-message
+    rpc: ClientStream
+    rest:
+      verb: POST
+      path: /v1/client-stream
+      body: '{"payload":"YQ==","responseDefinition":{"payload":"b25l"}}'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "one" }
+      received_count: 1
+
+  # --- deadlines ---------------------------------------------------------------
+  #
+  # A REST alias is a route, not a different protocol, so `grpc-timeout` applies
+  # there too — as a header on Fetch, as `timeoutMillis` in the WebSocket open
+  # frame. A server that only wires deadlines into the main paths fails these.
+
+  - name: unary-deadline-exceeded
+    rpc: Unary
+    timeout_millis: 100
+    rest:
+      verb: POST
+      path: /v1/unary
+      body: '{"payload":"eA==","responseDefinition":{"payload":"eA==","delayMs":2000}}'
+    expect:
+      status: { code: 4 }
+
+  - name: unary-within-deadline
+    rpc: Unary
+    timeout_millis: 5000
+    rest:
+      verb: POST
+      path: /v1/unary
+      body: '{"payload":"eA==","responseDefinition":{"payload":"eA==","delayMs":50}}'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "x" }
+
+  - name: stream-deadline-exceeded
+    rpc: ServerStream
+    timeout_millis: 250
+    rest:
+      verb: POST
+      path: /v1/server-stream
+      body: >-
+        {"responseDefinition":{"streamMessages":[{"payload":"YQ=="},
+        {"payload":"Yg==","delayMs":2000}]}}
+    expect:
+      status: { code: 4 }

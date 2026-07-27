@@ -49,12 +49,23 @@ service ConformanceService {
   // Client streaming: consumes the inbound stream, then returns one response built
   // from the ResponseDefinition on the FIRST request (later requests carry payload
   // only). `aggregate` reports what the server received.
-  rpc ClientStream(stream ClientStreamRequest) returns (ClientStreamResponse);
+  //
+  // Its REST alias is a WebSocket like any other streaming method's — client
+  // streaming is not "a POST with several bodies", it is a stream that happens to
+  // answer once.
+  rpc ClientStream(stream ClientStreamRequest) returns (ClientStreamResponse) {
+    option (google.api.http) = { post: "/v1/client-stream" body: "*" };
+  }
 
   // Bidi: for each inbound message, echoes one ConformancePayload back; closes with
   // the ResponseDefinition.status from the first request. Exercises interleaving,
   // half-close, and mid-stream Reset/cancel.
-  rpc BidiStream(stream BidiStreamRequest) returns (stream ConformancePayload);
+  //
+  // The REST alias makes this the only annotated route that carries MANY request
+  // messages, which is the one thing a single-body REST case cannot express.
+  rpc BidiStream(stream BidiStreamRequest) returns (stream ConformancePayload) {
+    option (google.api.http) = { post: "/v1/bidi-stream" body: "*" };
+  }
 
   // --- REST / google.api.http URL binding ------------------------------------
   //

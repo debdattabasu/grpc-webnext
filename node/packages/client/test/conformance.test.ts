@@ -17,9 +17,10 @@ import { load } from "js-yaml";
 import WebSocket from "ws";
 import { makeClient, Metadata, Status, type ClientOptions } from "../src/index.js";
 import {
-  // Imported as a *value*, not just a type: the REST driver decodes bare JSON
-  // response bodies with `ConformancePayload.fromJSON`, since a REST call carries
-  // no protobuf framing for the client to unwrap.
+  // Imported as *values*, not just types: the REST driver decodes bare JSON
+  // response bodies with `fromJSON`, since a REST call carries no protobuf framing
+  // for the client to unwrap.
+  ClientStreamResponse,
   ConformancePayload,
   ConformanceServiceDefinition,
   type Metadatum,
@@ -52,7 +53,7 @@ type Matcher = {
   payload?: Bytes;
   request_info?: { request_headers_contain?: Meta[]; timeout_present?: boolean; json?: boolean };
 };
-type Rest = { verb: string; path: string; body?: string; content_type?: string };
+type Rest = { verb: string; path: string; body?: string; bodies?: string[]; content_type?: string };
 type Case = {
   name: string;
   rpc: "Unary" | "ServerStream" | "ClientStream" | "BidiStream";
@@ -70,6 +71,7 @@ type Case = {
     response?: Matcher;
     messages?: Matcher[];
     message_count?: number;
+    received_count?: number;
     headers_contain?: Meta[];
     trailers_contain?: Meta[];
   };
@@ -157,6 +159,8 @@ interface Result {
   status: StatusResult;
   /** REST only: the raw HTTP status, for surface rejections that never become an RPC. */
   httpStatus?: number;
+  /** ClientStream only: how many request messages the server reports having received. */
+  receivedCount?: number;
 }
 type Client = ReturnType<typeof makeClient<typeof ConformanceServiceDefinition>>;
 
@@ -210,8 +214,14 @@ function runClientStream(client: Client, c: Case): Promise<Result> {
       const status: StatusResult = err
         ? { code: err.code, details: err.details ?? "", metadata: new Metadata() }
         : { code: Status.OK, details: "", metadata: new Metadata() };
-      const cs = value as { payload?: ConformancePayload } | undefined;
-      resolve({ headers: new Metadata(), messages: [], response: cs?.payload, status });
+      const cs = value as { payload?: ConformancePayload; receivedCount?: number } | undefined;
+      resolve({
+        headers: new Metadata(),
+        messages: [],
+        response: cs?.payload,
+        receivedCount: cs?.receivedCount,
+        status,
+      });
     });
     for (const r of reqs) stream.write(r);
     stream.end();
@@ -274,6 +284,9 @@ async function runRestFetch(baseUrl: string, c: Case): Promise<Result> {
   const headers: Record<string, string> = {};
   if (rest.body !== undefined) headers["content-type"] = rest.content_type ?? "application/json";
   else if (rest.content_type) headers["content-type"] = rest.content_type;
+  // A deadline is ordinary gRPC framing on the REST surface too — the same
+  // `grpc-timeout` header, since a REST alias is a route, not a different protocol.
+  if (c.timeout_millis) headers["grpc-timeout"] = `${c.timeout_millis}m`;
   for (const m of c.request_metadata ?? []) {
     // `-bin` metadata is base64 on the HTTP wire; the driver spells it the same way.
     headers[m.key] = m.b64 !== undefined ? m.b64 : (m.ascii ?? "");
@@ -300,6 +313,9 @@ async function runRestFetch(baseUrl: string, c: Case): Promise<Result> {
   return { headers: md, messages: [], response, status, httpStatus: resp.status };
 }
 
+/** The request messages a REST case sends: one `body`, several `bodies`, or none at all. */
+const restBodies = (rest: Rest): string[] => rest.bodies ?? (rest.body !== undefined ? [rest.body] : []);
+
 /**
  * A streaming annotation URL over WebSocket: text-locked single-stream JSON. A body-less
  * (GET-style) binding still needs one frame to open the stream — `{}` — after which the server
@@ -312,21 +328,30 @@ function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
   // wrong-surface subprotocol instead to exercise rejection.
   const protocols = rest.content_type ? [rest.content_type] : [];
   const ws = new wsImpl(url, protocols);
+  const bodies = restBodies(rest);
 
   return new Promise((resolve) => {
     let headers = new Metadata();
     const messages: ConformancePayload[] = [];
+    // A client-streaming route answers once, so its reply is the `response`, not a message.
+    let response: ConformancePayload | undefined;
+    let receivedCount: number | undefined;
     let status: StatusResult | undefined;
 
     ws.onopen = () => {
       const open: Record<string, unknown> = {};
       const md = Object.fromEntries((c.request_metadata ?? []).map((m) => [m.key, m.ascii ?? ""]));
       if (Object.keys(md).length) open.metadata = md;
-      if (rest.body !== undefined) open.message = JSON.parse(rest.body);
+      if (c.timeout_millis) open.timeoutMillis = c.timeout_millis;
+      // The opening frame carries the first request message inline; the rest follow as
+      // ordinary message frames. A body-less binding sends none at all — the server builds
+      // the one request from the URL.
+      if (bodies.length) open.message = JSON.parse(bodies[0]);
       ws.send(JSON.stringify(open));
-      // A REST case carries exactly one request message, so the send side is done.
-      // On a body-less binding the server has already half-closed on our behalf and
-      // this is a no-op; on a `body: "*"` binding it is what lets the RPC start.
+      for (const body of bodies.slice(1)) ws.send(JSON.stringify({ message: JSON.parse(body) }));
+      // The send side is done. On a body-less binding the server has already half-closed on
+      // our behalf and this is a no-op; on a `body: "*"` binding it is what lets a
+      // client-streaming or single-request RPC finish.
       ws.send(JSON.stringify({ halfClose: true }));
     };
     ws.onmessage = (ev) => {
@@ -335,16 +360,26 @@ function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
         message?: unknown;
         status?: { code?: number; message?: string };
       };
+      const meta = (m?: Record<string, string>) =>
+        toMetadata(Object.entries(m ?? {}).map(([key, ascii]) => ({ key, ascii })));
       if (frame.status) {
         status = {
           code: frame.status.code ?? Status.OK,
           details: frame.status.message ?? "",
-          metadata: toMetadata(Object.entries(frame.metadata ?? {}).map(([key, ascii]) => ({ key, ascii }))),
+          metadata: meta(frame.metadata),
         };
       } else if (frame.message !== undefined) {
-        messages.push(ConformancePayload.fromJSON(frame.message));
+        // A client-streaming RPC replies with a ClientStreamResponse wrapping the payload;
+        // every other cardinality replies with a bare ConformancePayload.
+        if (c.rpc === "ClientStream") {
+          const cs = ClientStreamResponse.fromJSON(frame.message);
+          response = cs.payload;
+          receivedCount = cs.receivedCount;
+        } else {
+          messages.push(ConformancePayload.fromJSON(frame.message));
+        }
       } else {
-        headers = toMetadata(Object.entries(frame.metadata ?? {}).map(([key, ascii]) => ({ key, ascii })));
+        headers = meta(frame.metadata);
       }
     };
     ws.onclose = (ev) => {
@@ -354,7 +389,7 @@ function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
         const code = ev.code >= 4000 && ev.code <= 4016 ? ev.code - 4000 : Status.UNAVAILABLE;
         status = { code, details: ev.reason ?? "", metadata: new Metadata() };
       }
-      resolve({ headers, messages, status });
+      resolve({ headers, messages, response, receivedCount, status });
     };
     ws.onerror = () => {
       if (!status) status = { code: Status.UNAVAILABLE, details: "websocket error", metadata: new Metadata() };
@@ -362,8 +397,13 @@ function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
   });
 }
 
+/**
+ * Only a *unary* method's annotation URL is a Fetch endpoint. Every streaming
+ * cardinality — client-streaming included, since it is a stream that happens to answer
+ * once — takes the WebSocket surface, exactly as on the main endpoints.
+ */
 const runRestCase = (baseUrl: string, c: Case): Promise<Result> =>
-  c.rpc === "Unary" || c.rpc === "ClientStream" ? runRestFetch(baseUrl, c) : runRestWebSocket(baseUrl, c);
+  c.rpc === "Unary" ? runRestFetch(baseUrl, c) : runRestWebSocket(baseUrl, c);
 
 // --- assertions --------------------------------------------------------------------------
 const bytesEq = (a: Uint8Array | undefined, b: Uint8Array) =>
@@ -424,6 +464,10 @@ function assertCase(c: Case, r: Result) {
     c.expect.messages.forEach((pm, i) => assertPayload(pm, r.messages[i]));
   }
   if (c.expect.message_count !== undefined) expect(r.messages.length).toBe(c.expect.message_count);
+  // The one assertion that proves a client stream's messages after the first arrived at all:
+  // the response payload comes from the FIRST request's ResponseDefinition regardless.
+  if (c.expect.received_count !== undefined)
+    expect(r.receivedCount, "received_count").toBe(c.expect.received_count);
   if (c.expect.headers_contain) assertMetaContains(r.headers, c.expect.headers_contain);
   if (c.expect.trailers_contain) assertMetaContains(r.status.metadata, c.expect.trailers_contain);
 }

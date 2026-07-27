@@ -64,10 +64,17 @@ type ConformanceServiceClient interface {
 	// Client streaming: consumes the inbound stream, then returns one response built
 	// from the ResponseDefinition on the FIRST request (later requests carry payload
 	// only). `aggregate` reports what the server received.
+	//
+	// Its REST alias is a WebSocket like any other streaming method's — client
+	// streaming is not "a POST with several bodies", it is a stream that happens to
+	// answer once.
 	ClientStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ClientStreamRequest, ClientStreamResponse], error)
 	// Bidi: for each inbound message, echoes one ConformancePayload back; closes with
 	// the ResponseDefinition.status from the first request. Exercises interleaving,
 	// half-close, and mid-stream Reset/cancel.
+	//
+	// The REST alias makes this the only annotated route that carries MANY request
+	// messages, which is the one thing a single-body REST case cannot express.
 	BidiStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BidiStreamRequest, ConformancePayload], error)
 	// Unary, reachable three ways, so one RPC covers every binding shape:
 	//
@@ -195,10 +202,17 @@ type ConformanceServiceServer interface {
 	// Client streaming: consumes the inbound stream, then returns one response built
 	// from the ResponseDefinition on the FIRST request (later requests carry payload
 	// only). `aggregate` reports what the server received.
+	//
+	// Its REST alias is a WebSocket like any other streaming method's — client
+	// streaming is not "a POST with several bodies", it is a stream that happens to
+	// answer once.
 	ClientStream(grpc.ClientStreamingServer[ClientStreamRequest, ClientStreamResponse]) error
 	// Bidi: for each inbound message, echoes one ConformancePayload back; closes with
 	// the ResponseDefinition.status from the first request. Exercises interleaving,
 	// half-close, and mid-stream Reset/cancel.
+	//
+	// The REST alias makes this the only annotated route that carries MANY request
+	// messages, which is the one thing a single-body REST case cannot express.
 	BidiStream(grpc.BidiStreamingServer[BidiStreamRequest, ConformancePayload]) error
 	// Unary, reachable three ways, so one RPC covers every binding shape:
 	//

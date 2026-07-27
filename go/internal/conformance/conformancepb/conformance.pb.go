@@ -891,13 +891,13 @@ const file_conformance_proto_rawDesc = "" +
 	"\vascii_value\x18\x02 \x01(\tH\x00R\n" +
 	"asciiValue\x12\x1d\n" +
 	"\tbin_value\x18\x03 \x01(\fH\x00R\bbinValueB\a\n" +
-	"\x05value2\xda\x06\n" +
+	"\x05value2\x96\a\n" +
 	"\x12ConformanceService\x12y\n" +
 	"\x05Unary\x12).grpc.webnext.conformance.v1.UnaryRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"\x14\x82\xd3\xe4\x93\x02\x0e:\x01*\"\t/v1/unary\x12\x91\x01\n" +
-	"\fServerStream\x120.grpc.webnext.conformance.v1.ServerStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"\x1c\x82\xd3\xe4\x93\x02\x16:\x01*\"\x11/v1/server-stream0\x01\x12u\n" +
-	"\fClientStream\x120.grpc.webnext.conformance.v1.ClientStreamRequest\x1a1.grpc.webnext.conformance.v1.ClientStreamResponse(\x01\x12q\n" +
+	"\fServerStream\x120.grpc.webnext.conformance.v1.ServerStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"\x1c\x82\xd3\xe4\x93\x02\x16:\x01*\"\x11/v1/server-stream0\x01\x12\x93\x01\n" +
+	"\fClientStream\x120.grpc.webnext.conformance.v1.ClientStreamRequest\x1a1.grpc.webnext.conformance.v1.ClientStreamResponse\"\x1c\x82\xd3\xe4\x93\x02\x16:\x01*\"\x11/v1/client-stream(\x01\x12\x8d\x01\n" +
 	"\n" +
-	"BidiStream\x12..grpc.webnext.conformance.v1.BidiStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload(\x010\x01\x12\xaf\x01\n" +
+	"BidiStream\x12..grpc.webnext.conformance.v1.BidiStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"\x1a\x82\xd3\xe4\x93\x02\x14:\x01*\"\x0f/v1/bidi-stream(\x010\x01\x12\xaf\x01\n" +
 	"\tRestUnary\x12-.grpc.webnext.conformance.v1.RestUnaryRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"B\x82\xd3\xe4\x93\x02<Z\r:\x01*\"\b/v1/restZ\x17:\x01*\"\x12/v1/rest/{payload}\x12\x12/v1/rest/{payload}\x12\x98\x01\n" +
 	"\x10RestServerStream\x12..grpc.webnext.conformance.v1.RestStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"!\x82\xd3\xe4\x93\x02\x1b\x12\x19/v1/rest-stream/{payload}0\x01b\x06proto3"
 

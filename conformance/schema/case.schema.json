@@ -76,17 +76,27 @@
       }
     },
     "rest": {
-      "description": "Drive this case as a raw google.api.http REST call instead of an RPC through the client. The URL is the route, so `rpc` only selects the transport the spec mandates: a unary method's annotation URL is Fetch, a streaming method's is a WebSocket. Always JSON, so `codecs`/`transports` do not apply and the case runs exactly once.",
+      "description": "Drive this case as a raw google.api.http REST call instead of an RPC through the client. The URL is the route, so `rpc` only selects the transport the spec mandates: a unary method's annotation URL is Fetch, a streaming method's (including client-streaming) is a WebSocket. Always JSON, so `codecs`/`transports` do not apply and the case runs exactly once. `cancel_after_messages` is NOT honored on a REST case — synthesizing CANCELLED locally is client behavior, and this driver is deliberately not a client.",
       "type": "object",
       "required": ["verb", "path"],
       "additionalProperties": false,
+      "oneOf": [
+        { "not": { "required": ["body"] } },
+        { "not": { "required": ["bodies"] } }
+      ],
       "properties": {
         "verb": {
           "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
           "description": "HTTP method. Ignored on the WebSocket surface, where an upgrade is always a GET and matching is verb-agnostic."
         },
         "path": { "type": "string", "description": "Annotation URL including any query string, e.g. \"/v1/rest-stream/hi?count=3\"." },
-        "body": { "type": "string", "description": "Raw JSON request body. Omit for a body-less (GET-style) binding." },
+        "body": { "type": "string", "description": "Raw JSON request body — one request message. Omit for a body-less (GET-style) binding. Mutually exclusive with `bodies`." },
+        "bodies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Several raw JSON request messages, for a client-streaming or bidi annotation route: the first opens the stream, the rest follow as message frames, then the driver half-closes. WebSocket surface only — a Fetch REST call carries exactly one body. Mutually exclusive with `body`."
+        },
         "content_type": {
           "type": "string",
           "description": "Override the request content-type (Fetch) or the offered subprotocol (WebSocket). Default: plain `application/json` on Fetch, a blank subprotocol on WebSocket — the surfaces a browser reaches an annotated URL with. Set it to a wrong-surface value to exercise rejection."
@@ -142,6 +152,10 @@
             "response": { "$ref": "#/$defs/payloadMatcher" },
             "messages": { "type": "array", "items": { "$ref": "#/$defs/payloadMatcher" } },
             "message_count": { "type": "integer" },
+            "received_count": {
+              "type": "integer",
+              "description": "ClientStream only: how many request messages the server reports having received (ClientStreamResponse.received_count). Without this, a client-streaming case proves nothing about messages after the first — the response payload comes from the FIRST request's ResponseDefinition either way."
+            },
             "headers_contain": { "type": "array", "items": { "$ref": "#/$defs/metadatum" } },
             "trailers_contain": { "type": "array", "items": { "$ref": "#/$defs/metadatum" } }
           }

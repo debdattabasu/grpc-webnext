@@ -89,14 +89,14 @@ grammar. Current coverage:
 | Suite | File | Covers |
 |-------|------|--------|
 | unary | [cases/unary.yaml](cases/unary.yaml) | OK, empty payload, non-OK status + trailing metadata, response headers |
-| streaming | [cases/streaming.yaml](cases/streaming.yaml) | server-stream (incl. messages-then-error), client-stream aggregate, bidi echo, client cancel → CANCELLED |
+| streaming | [cases/streaming.yaml](cases/streaming.yaml) | server-stream (incl. messages-then-error), client-stream aggregate (with `received_count`), bidi echo, client cancel → CANCELLED |
 | deadline | [cases/deadline.yaml](cases/deadline.yaml) | unary + stream `grpc-timeout` expiry (DEADLINE_EXCEEDED); within-deadline passes |
 | limits | [cases/limits.yaml](cases/limits.yaml) | oversize request rejected on every path, large response intact, `+json` w/o transcoder → UNIMPLEMENTED, ASCII+`-bin` metadata round-trip on **both** Fetch and WebSocket |
-| rest | [cases/rest.yaml](cases/rest.yaml) | `google.api.http` routes: `body:"*"` on Fetch and WebSocket, path/query binding, `additional_bindings`, binding precedence, status + metadata across the REST surface, and both wrong-surface rejections |
+| rest | [cases/rest.yaml](cases/rest.yaml) | `google.api.http` routes: `body:"*"` on Fetch and WebSocket, path/query binding, `additional_bindings`, binding precedence, status + metadata fidelity, deadlines, **multi-message** bidi and client-streaming routes, and both wrong-surface rejections |
 
 Each case runs under every applicable **transport profile** — `proto/h2ts` (real gRPC over
 the h2ts tunnel), `proto/ws` (the custom `Frame` path, unary over Fetch), and `json` (the
-custom path, Fetch + WS) — against **every server implementation**. 65 case×profile runs per
+custom path, Fetch + WS) — against **every server implementation**. 72 case×profile runs per
 server, Rust and Go, all green.
 
 ### REST cases are different, on purpose
@@ -112,15 +112,22 @@ transport (a unary annotation URL is Fetch, a streaming one is a WebSocket — t
 rule, not the driver's choice). What the matrix still contributes is the part that matters:
 every REST case runs against **every server implementation**.
 
-Two conventions worth knowing before writing one:
+Four conventions worth knowing before writing one:
 
 - **Rejections.** A Fetch-surface refusal never becomes an RPC, so it is asserted with
   `expect.http_status` (e.g. `+proto` on a REST URL is `415`). A WebSocket refusal *does*
   carry a status — the `4000 + code` close — so it is asserted as an ordinary
   `expect.status.code`, exactly as a browser would read it.
-- **One request message.** `rest.body` is a single JSON document, so the driver sends one
-  request frame and half-closes. That covers unary and server-streaming annotation routes;
-  a multi-message bidi REST case would need the schema to grow a list first.
+- **One or many request messages.** `rest.body` is a single JSON document; `rest.bodies` is
+  a list of them, for the client-streaming and bidi annotation routes — the first opens the
+  stream, the rest follow as message frames, then the driver half-closes. Those are the only
+  cases that prove an annotated URL is a real bidirectional stream rather than a fancy POST.
+- **Client streaming is a WebSocket route**, not a Fetch one. It is a stream that happens to
+  answer once, so its annotation URL behaves like every other streaming method's — routing it
+  to Fetch is the easy mistake, and `client-stream-multi-message` is what catches it.
+- **`cancel_after_messages` is not honored** on a REST case. Turning a mid-stream reset into
+  a local `CANCELLED` is *client* behavior, and this driver is deliberately not a client; the
+  main-surface bidi cancel case covers it instead.
 
 **Design notes** (surfaced by the run — behavior pinned, not gaps):
 - **Size limits are request-only, by design.** `max_message_bytes` bounds inbound *request*
@@ -157,12 +164,21 @@ reason. Both build scripts now declare their out-of-package inputs with
 artifact is not a weaker guard, it is a *lying* one, and only a case that failed for a
 protocol reason it couldn't explain exposed it.
 
+Extending the REST suite to multi-message routes also exposed a hole in an **existing**
+case. `client-stream/aggregate` sent three requests and asserted only the response payload —
+which comes from the *first* request's `ResponseDefinition` regardless, so a server that
+silently dropped messages two and three would have passed. `ClientStreamResponse` has carried
+`received_count` for exactly this since the proto was written; nothing read it. It is now an
+`expect.received_count` matcher, asserted on both the main-surface and REST client-streaming
+cases. Worth generalizing: **when a case's assertion would hold even if the thing it is named
+after never happened, it is decoration.**
+
 **Not yet covered** (tracked, not silently omitted): WebSocket keepalive/idle-timeout,
-connection-level auth (Subscribe rejection), half-close ordering edge cases, and — within
-REST — multi-message bidi annotation routes (the `rest.body` schema holds one document) and
-the unsupported HttpRule features in [`/doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md),
-which are shared by both implementations and pinned by per-language tests instead. Add these
-as new suites; extend the table when you do.
+connection-level auth (Subscribe rejection), half-close ordering edge cases, mid-stream
+cancellation over a REST route (see above), and the unsupported HttpRule features in
+[`/doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md), which are shared by both implementations
+and pinned by per-language tests instead. Add these as new suites; extend the table when you
+do.
 
 ## Running
 

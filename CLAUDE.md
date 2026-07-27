@@ -40,7 +40,7 @@ cd rust && cargo clippy --workspace --all-targets   # keep clean
 # lockfile that governs the tree. The e2e/json/promise/h2ts tests spawn the Rust example
 # servers, and the conformance matrix builds and spawns BOTH the Rust and Go conformance
 # servers — so the full suite needs a Rust and a Go toolchain.
-cd node && npm ci && npm test               # 174 tests (client; server is build-only)
+cd node && npm ci && npm test               # 188 tests (client; server is build-only)
 
 # Go. The WS path has a reader, a writer, and a keepalive ticker on one connection,
 # so -race earns its runtime.

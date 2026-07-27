@@ -1442,6 +1442,10 @@ export const ConformanceServiceDefinition = {
      * Client streaming: consumes the inbound stream, then returns one response built
      * from the ResponseDefinition on the FIRST request (later requests carry payload
      * only). `aggregate` reports what the server received.
+     *
+     * Its REST alias is a WebSocket like any other streaming method's — client
+     * streaming is not "a POST with several bodies", it is a stream that happens to
+     * answer once.
      */
     clientStream: {
       name: "ClientStream",
@@ -1449,12 +1453,45 @@ export const ConformanceServiceDefinition = {
       requestStream: true,
       responseType: ClientStreamResponse as typeof ClientStreamResponse,
       responseStream: false,
-      options: {},
+      options: {
+        _unknownFields: {
+          578365826: [
+            new Uint8Array([
+              22,
+              34,
+              17,
+              47,
+              118,
+              49,
+              47,
+              99,
+              108,
+              105,
+              101,
+              110,
+              116,
+              45,
+              115,
+              116,
+              114,
+              101,
+              97,
+              109,
+              58,
+              1,
+              42,
+            ]) as Uint8Array,
+          ],
+        },
+      },
     },
     /**
      * Bidi: for each inbound message, echoes one ConformancePayload back; closes with
      * the ResponseDefinition.status from the first request. Exercises interleaving,
      * half-close, and mid-stream Reset/cancel.
+     *
+     * The REST alias makes this the only annotated route that carries MANY request
+     * messages, which is the one thing a single-body REST case cannot express.
      */
     bidiStream: {
       name: "BidiStream",
@@ -1462,7 +1499,35 @@ export const ConformanceServiceDefinition = {
       requestStream: true,
       responseType: ConformancePayload as typeof ConformancePayload,
       responseStream: true,
-      options: {},
+      options: {
+        _unknownFields: {
+          578365826: [
+            new Uint8Array([
+              20,
+              34,
+              15,
+              47,
+              118,
+              49,
+              47,
+              98,
+              105,
+              100,
+              105,
+              45,
+              115,
+              116,
+              114,
+              101,
+              97,
+              109,
+              58,
+              1,
+              42,
+            ]) as Uint8Array,
+          ],
+        },
+      },
     },
     /**
      * Unary, reachable three ways, so one RPC covers every binding shape:

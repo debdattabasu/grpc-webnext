@@ -53,6 +53,10 @@ cases:
       status: { code: 0 }
       response:
         payload: { text: "ok" }
+      # Without this the case proves nothing about messages 2 and 3: the response
+      # payload comes from the FIRST request's ResponseDefinition either way, so a
+      # server that dropped the rest would still look correct.
+      received_count: 3
 
   # Bidi: server echoes each inbound message; interleaving allowed.
   - name: bidi/echo
