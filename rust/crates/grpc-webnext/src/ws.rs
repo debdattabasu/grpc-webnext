@@ -152,18 +152,22 @@ async fn handle_frame(
     match frame.kind {
         Some(Kind::Subscribe(sub)) => {
             if stream.is_some() {
+                // Rejecting the duplicate open, not the live stream — which is still
+                // running and will deliver its own terminal frame and close. This is the
+                // one `Reset` that is *not* a stream's terminal frame, so it does not
+                // tear the connection down.
                 send_reset(outbound_tx, json, Code::InvalidArgument, "stream already open").await;
                 return;
             }
             // An opening frame may carry the first message inline; hold it to the size limit.
             if sub.initial_payload.len() > rt.cfg.max_message_bytes {
-                send_reset(outbound_tx, json, Code::ResourceExhausted, "request message exceeds size limit").await;
+                reject_stream(outbound_tx, json, Code::ResourceExhausted, "request message exceeds size limit").await;
                 return;
             }
             let path: PathAndQuery = match sub.method.parse() {
                 Ok(p) => p,
                 Err(_) => {
-                    send_reset(outbound_tx, json, Code::InvalidArgument, "invalid method").await;
+                    reject_stream(outbound_tx, json, Code::InvalidArgument, "invalid method").await;
                     return;
                 }
             };
@@ -192,10 +196,10 @@ async fn handle_frame(
         }
         Some(Kind::Message(msg)) => {
             if msg.payload.len() > rt.cfg.max_message_bytes {
-                send_reset(outbound_tx, json, Code::ResourceExhausted, "request message exceeds size limit").await;
                 if let Some(state) = stream.take() {
                     state.task.abort();
                 }
+                reject_stream(outbound_tx, json, Code::ResourceExhausted, "request message exceeds size limit").await;
                 return;
             }
             if let Some(state) = stream {
@@ -353,6 +357,14 @@ async fn run_stream(
     // or `Reset` was delivered above), close the socket — proto and json alike. This is the
     // stream-level teardown for a single-stream connection. (The h2ts binary path is a
     // separate, multiplexed connection we never own, so it is untouched by this.)
+    let _ = outbound_tx.send(close_normal()).await;
+}
+
+/// Reject the stream: a terminal `Reset` followed by the normal close. A WebSocket carries
+/// exactly one stream, so once that stream has ended — whether by `Trailer` or by `Reset` —
+/// the socket has served its purpose (see PROTOCOL.md "Single-stream teardown").
+async fn reject_stream(outbound_tx: &mpsc::Sender<TungMessage>, json: bool, code: Code, message: &str) {
+    send_reset(outbound_tx, json, code, message).await;
     let _ = outbound_tx.send(close_normal()).await;
 }
 

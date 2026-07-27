@@ -141,3 +141,36 @@ async fn proto_ws_closes_after_error_terminal() {
     .await;
     assert_eq!(code, CloseCode::Normal, "the socket closes after an error terminal too");
 }
+
+#[tokio::test]
+async fn proto_ws_closes_after_size_limit_reset() {
+    // A `Reset` is a terminal frame too, so the size-limit rejection tears the socket down
+    // exactly like a `Trailer` does. Without this, an oversized message left the connection
+    // open with no stream on it — a leak the client can only resolve by timing out.
+    let routes = Routes::new(EchoServer::new(EchoSvc::default()));
+    let (addr, _handle) =
+        bind_and_serve_in_process(routes, ServerConfig { max_message_bytes: 1024, ..Default::default() })
+            .await
+            .unwrap();
+    let base = format!("ws://{addr}");
+
+    let mut ws = ws_connect(&format!("{base}/echo.v1.Echo/Unary"), "grpc-webnext+proto").await;
+    // Open the stream, then push a message past the limit.
+    ws.send(subscribe_proto()).await.unwrap();
+    let oversized = EchoRequest { message: "z".repeat(4096) }.encode_to_vec();
+    ws.send(TungMessage::Binary(encode_frame(&Frame {
+        kind: Some(Kind::Message(grpc_webnext::pb::Message { payload: oversized.into() })),
+    })))
+    .await
+    .unwrap();
+
+    let code = drain_to_close(&mut ws, |msg| {
+        let TungMessage::Binary(data) = msg else { return false };
+        match decode_frame(data).map(|f| f.kind) {
+            Ok(Some(Kind::Reset(r))) => r.status_code == tonic::Code::ResourceExhausted as u32,
+            _ => false,
+        }
+    })
+    .await;
+    assert_eq!(code, CloseCode::Normal, "the socket closes after a size-limit Reset");
+}
