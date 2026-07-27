@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use crate::pb::{metadatum, Metadatum};
 use http::{HeaderMap, HeaderName, HeaderValue};
-use tonic::metadata::MetadataMap;
+use tonic::metadata::{
+    AsciiMetadataKey, BinaryMetadataKey, KeyAndValueRef, MetadataMap, MetadataValue,
+};
 
 /// Headers that must not be forwarded as gRPC metadata (hop-by-hop, framing, or
 /// set by the gRPC stack itself).
@@ -54,51 +56,76 @@ pub fn merge_metadata_into_headers(meta: &MetadataMap, headers: &mut HeaderMap) 
 }
 
 /// Convert a protobuf metadata list (from a frame) into a gRPC metadata map.
+///
+/// A `-bin` entry carries **raw bytes** in the frame but is **base64** on the HTTP wire, so
+/// it must go through tonic's binary metadata API rather than straight into a `HeaderValue`
+/// — raw bytes are not a legal header value at all (a control byte would simply be dropped).
 pub fn metadata_vec_to_metadata(items: &[Metadatum]) -> MetadataMap {
-    let mut headers = HeaderMap::new();
+    let mut md = MetadataMap::new();
     for m in items {
-        let name = match HeaderName::from_bytes(m.key.as_bytes()) {
-            Ok(n) if !is_denied(&n) => n,
+        match HeaderName::from_bytes(m.key.as_bytes()) {
+            Ok(n) if !is_denied(&n) => {}
             _ => continue,
-        };
+        }
         match &m.value {
             Some(metadatum::Value::AsciiValue(s)) => {
-                if let Ok(v) = HeaderValue::from_str(s) {
-                    headers.append(name, v);
+                // An ASCII value under a `-bin` key has no valid encoding; the key parse
+                // rejects it, which is the behavior we want.
+                if let (Ok(k), Ok(v)) = (
+                    m.key.parse::<AsciiMetadataKey>(),
+                    MetadataValue::try_from(s.as_str()),
+                ) {
+                    md.append(k, v);
                 }
             }
             Some(metadatum::Value::BinValue(b)) => {
-                if let Ok(v) = HeaderValue::from_bytes(b) {
-                    headers.append(name, v);
+                if let Ok(k) = m.key.parse::<BinaryMetadataKey>() {
+                    md.append_bin(k, MetadataValue::from_bytes(b));
                 }
             }
             None => {}
         }
     }
-    MetadataMap::from_headers(headers)
+    md
 }
 
-/// Convert a gRPC metadata map into a protobuf metadata list for a frame.
+/// Convert a gRPC metadata map into a protobuf metadata list for a frame — the inverse of
+/// [`metadata_vec_to_metadata`], so a `-bin` value is base64-**decoded** back to raw bytes.
 pub fn metadata_to_vec(meta: &MetadataMap) -> Vec<Metadatum> {
     let mut out = Vec::new();
-    for (name, value) in meta.clone().into_headers().iter() {
-        if is_denied(name) {
-            continue;
-        }
-        let key = name.as_str().to_string();
-        if key.ends_with("-bin") {
-            out.push(Metadatum {
-                key,
-                value: Some(metadatum::Value::BinValue(value.as_bytes().to_vec().into())),
-            });
-        } else if let Ok(s) = value.to_str() {
-            out.push(Metadatum {
-                key,
-                value: Some(metadatum::Value::AsciiValue(s.to_string())),
-            });
+    for kv in meta.iter() {
+        match kv {
+            KeyAndValueRef::Ascii(name, value) => {
+                let key = name.as_str().to_string();
+                if is_denied_str(&key) {
+                    continue;
+                }
+                if let Ok(s) = value.to_str() {
+                    out.push(Metadatum {
+                        key,
+                        value: Some(metadatum::Value::AsciiValue(s.to_string())),
+                    });
+                }
+            }
+            KeyAndValueRef::Binary(name, value) => {
+                let key = name.as_str().to_string();
+                if is_denied_str(&key) {
+                    continue;
+                }
+                if let Ok(bytes) = value.to_bytes() {
+                    out.push(Metadatum {
+                        key,
+                        value: Some(metadatum::Value::BinValue(bytes)),
+                    });
+                }
+            }
         }
     }
     out
+}
+
+fn is_denied_str(key: &str) -> bool {
+    DENY.contains(&key)
 }
 
 /// Parse a gRPC `grpc-timeout` header (e.g. `100m`, `5S`) into a Duration.
