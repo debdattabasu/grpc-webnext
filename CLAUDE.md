@@ -41,6 +41,15 @@ cd go && go build ./... && go vet ./...
 Servers signal readiness by printing `LISTENING http://<addr>` on stdout — the
 harness (and conformance runner) parse that line.
 
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs those same three ecosystems as
+parallel jobs on every push/PR — clippy `-D warnings` + `cargo test` + `cargo package` (which
+exercises the crates.io vendored-proto fallback), the TS build + full vitest suite (e2e and the
+conformance matrix, so it needs Rust too), and Go fmt/build/vet/test. It also fails if the
+vendored proto mirror was committed stale — `build.rs` refreshes it during the build, so the
+`vendored_proto` test can't catch that; only a dirty tree afterwards can. `cargo fmt --check` is
+deliberately **not** a gate: the tree is hand-formatted and ~230 files differ from rustfmt
+defaults.
+
 ## Architecture
 
 One port; `content-type` and the WebSocket subprotocol disambiguate. Transport is a

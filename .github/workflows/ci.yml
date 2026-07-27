@@ -1,0 +1,157 @@
+name: CI
+
+# One workflow for the polyglot monorepo: each language ecosystem is a job, and the
+# TS job additionally drives the cross-language conformance matrix over the real wire.
+#
+# Third-party actions are pinned to a commit SHA (the tag in the trailing comment is what
+# that SHA was at the time of writing) — a moving tag is a supply-chain hole.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust — server + proxy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # prost-build shells out to `protoc`; it is not vendored (see rust/Cargo.lock).
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+
+      # The Cargo workspace lives in rust/, not the repo root.
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          workspaces: rust
+
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        working-directory: rust
+        run: cargo test --workspace --locked
+
+      # build.rs refreshes the crate's vendored proto mirror from /proto on every
+      # in-workspace build, so the `vendored_proto` test can never fail in CI — it compares
+      # the *just-refreshed* copy. A mirror that was committed stale only shows up as a
+      # dirty tree after the build above, which is what this checks.
+      - name: Vendored proto mirror is committed in sync with /proto
+        run: |
+          if ! git diff --quiet -- rust/crates/grpc-webnext/proto/grpc_webnext.proto; then
+            echo "::error::rust/crates/grpc-webnext/proto/grpc_webnext.proto is stale vs /proto."
+            echo "Edit the proto at /proto only, then run a Rust build and commit the refreshed mirror."
+            git diff -- rust/crates/grpc-webnext/proto/grpc_webnext.proto
+            exit 1
+          fi
+
+      # A crates.io consumer has no repo root, so build.rs falls back to the vendored
+      # mirror and the dev-only tests/ are excluded. Packaging verifies that path builds.
+      - name: Package the crate (crates.io build, vendored-proto fallback)
+        working-directory: rust
+        run: cargo package -p grpc-webnext --locked
+
+  node:
+    name: node — TS client + conformance matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The e2e / json / promise / h2ts / conformance suites spawn the Rust example
+      # servers, so this job needs the full Rust toolchain too.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          workspaces: rust
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: node/packages/client/package-lock.json
+
+      # Those suites wait 60s for `LISTENING …` after `cargo run`; a cold compile inside
+      # the test would blow that budget, so build the servers up front.
+      - name: Prebuild the Rust test servers
+        working-directory: rust
+        run: cargo build --locked -p devserver -p example-greeter-server -p conformance-server
+
+      # Install from the client package (it carries the lockfile the project actually
+      # uses — node/package-lock.json is a stale remnant of the pre-monorepo layout).
+      - name: Install
+        working-directory: node/packages/client
+        run: npm ci
+
+      - name: Build
+        working-directory: node/packages/client
+        run: npm run build
+
+      # The server skeleton has no deps of its own; borrow the client's tsc so the
+      # package is still typechecked rather than silently rotting.
+      - name: Typecheck the server skeleton
+        working-directory: node/packages/server
+        run: ../client/node_modules/.bin/tsc -p tsconfig.json --noEmit
+
+      # Unit + e2e + the conformance matrix (cases × transports × codecs).
+      - name: Test
+        working-directory: node/packages/client
+        run: npm test
+
+  go:
+    name: go — in-process server
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache: false # stdlib-only module: no go.sum to key a cache on
+
+      - name: gofmt
+        working-directory: go
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: go
+        run: go build ./...
+
+      - name: Vet
+        working-directory: go
+        run: go vet ./...
+
+      # No test files yet; this starts guarding them the moment they land.
+      - name: Test
+        working-directory: go
+        run: go test ./...
