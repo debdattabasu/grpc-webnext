@@ -88,6 +88,13 @@ jobs:
         with:
           workspaces: rust
 
+      # The conformance matrix runs every case against BOTH server implementations, so
+      # this job builds and spawns the Go conformance server too.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -95,10 +102,15 @@ jobs:
           cache-dependency-path: node/package-lock.json
 
       # Those suites wait 60s for `LISTENING …` after `cargo run`; a cold compile inside
-      # the test would blow that budget, so build the servers up front.
+      # the test would blow that budget, so build the servers up front. (The conformance
+      # runner also builds them itself, but warming the caches here keeps that cheap.)
       - name: Prebuild the Rust test servers
         working-directory: rust
         run: cargo build --locked -p devserver -p example-greeter-server -p conformance-server
+
+      - name: Prebuild the Go conformance server
+        working-directory: go
+        run: go build -o target/conformance-server ./examples/conformance-server
 
       # Install/build/test from the workspace root: npm resolves a member install to the
       # root anyway, so node/package-lock.json is the lockfile that actually governs the
@@ -127,7 +139,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go/go.mod
-          cache: false # stdlib-only module: no go.sum to key a cache on
+          cache-dependency-path: go/go.sum
 
       - name: gofmt
         working-directory: go
@@ -147,7 +159,19 @@ jobs:
         working-directory: go
         run: go vet ./...
 
-      # No test files yet; this starts guarding them the moment they land.
+      # The WebSocket path has a reader, a writer, and a keepalive ticker on one
+      # connection, so the race detector earns its runtime here.
       - name: Test
         working-directory: go
-        run: go test ./...
+        run: go test -race ./...
+
+      # `go mod tidy` must be a no-op: a drifting go.mod/go.sum breaks a fresh clone.
+      - name: go.mod is tidy
+        working-directory: go
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go.mod / go.sum are not tidy; run 'go mod tidy' in go/ and commit."
+            git diff -- go.mod go.sum
+            exit 1
+          fi
