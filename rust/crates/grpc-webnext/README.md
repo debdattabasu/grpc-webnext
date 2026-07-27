@@ -6,7 +6,7 @@
 [![docs.rs](https://img.shields.io/docsrs/grpc-webnext.svg)](https://docs.rs/grpc-webnext)
 [![license](https://img.shields.io/crates/l/grpc-webnext.svg)](#license)
 
-The Rust server for [**grpc-webnext**](https://github.com/debdattabasu/grpc_webnext) — it brings
+The Rust server for [**grpc-webnext**](https://github.com/debdattabasu/grpc-webnext) — it brings
 the **complete** gRPC experience (all four call types, deadlines, metadata, trailers,
 cancellation) to the browser, on the **same port** as native gRPC. Use it two ways:
 
@@ -82,13 +82,13 @@ interceptor in-process, or your mesh's `ext_authz` in front of the proxy.
 
 ## Ecosystem
 
-- **Repository & docs:** https://github.com/debdattabasu/grpc_webnext — normative
-  [`spec/PROTOCOL.md`](https://github.com/debdattabasu/grpc_webnext/blob/main/spec/PROTOCOL.md)
-  and the language-neutral [conformance suite](https://github.com/debdattabasu/grpc_webnext/tree/main/conformance).
+- **Repository & docs:** https://github.com/debdattabasu/grpc-webnext — normative
+  [`spec/PROTOCOL.md`](https://github.com/debdattabasu/grpc-webnext/blob/main/spec/PROTOCOL.md)
+  and the language-neutral [conformance suite](https://github.com/debdattabasu/grpc-webnext/tree/main/conformance).
 - **Browser / Node client:** [`@grpc-webnext/client`](https://www.npmjs.com/package/@grpc-webnext/client) (npm).
 - **h2ts** — real HTTP/2 over WebSocket, the default transport: https://github.com/debdattabasu/h2ts.
 
 ## License
 
-Dual-licensed under either [Apache-2.0](https://github.com/debdattabasu/grpc_webnext/blob/main/LICENSE-APACHE)
-or [MIT](https://github.com/debdattabasu/grpc_webnext/blob/main/LICENSE-MIT), at your option.
+Dual-licensed under either [Apache-2.0](https://github.com/debdattabasu/grpc-webnext/blob/main/LICENSE-APACHE)
+or [MIT](https://github.com/debdattabasu/grpc-webnext/blob/main/LICENSE-MIT), at your option.

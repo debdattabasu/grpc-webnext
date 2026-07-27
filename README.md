@@ -4,7 +4,7 @@
 
 **Full bidirectional gRPC in the browser — real HTTP/2, REST, and WebSockets, on the same port as native gRPC.**
 
-[![CI](https://github.com/debdattabasu/grpc_webnext/actions/workflows/ci.yml/badge.svg)](https://github.com/debdattabasu/grpc_webnext/actions/workflows/ci.yml)
+[![CI](https://github.com/debdattabasu/grpc-webnext/actions/workflows/ci.yml/badge.svg)](https://github.com/debdattabasu/grpc-webnext/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/grpc-webnext.svg?label=crates.io%20server)](https://crates.io/crates/grpc-webnext)
 [![npm](https://img.shields.io/npm/v/@grpc-webnext/client.svg?label=npm%20client)](https://www.npmjs.com/package/@grpc-webnext/client)
 [![Spec](https://img.shields.io/badge/spec-normative-success.svg)](spec/PROTOCOL.md)

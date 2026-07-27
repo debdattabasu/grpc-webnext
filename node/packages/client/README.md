@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@grpc-webnext/client.svg)](https://www.npmjs.com/package/@grpc-webnext/client)
 [![license](https://img.shields.io/npm/l/@grpc-webnext/client.svg)](#license)
 
-The TypeScript client for [**grpc-webnext**](https://github.com/debdattabasu/grpc_webnext) —
+The TypeScript client for [**grpc-webnext**](https://github.com/debdattabasu/grpc-webnext) —
 all four call types, deadlines, metadata, trailers, and cancellation, with **no translation on
 the default path**. The browser runs a real HTTP/2 stack tunneled over a WebSocket, straight into
 an unmodified gRPC server. Want plaintext instead? Flip one switch for **JSON over Fetch +
@@ -99,17 +99,17 @@ interface ClientOptions {
 ## Server side
 
 This package is the client. To serve grpc-webnext, wrap a native gRPC server in-process or run
-the schema-agnostic proxy — see the [main repository](https://github.com/debdattabasu/grpc_webnext).
+the schema-agnostic proxy — see the [main repository](https://github.com/debdattabasu/grpc-webnext).
 The endpoint speaks grpc-webnext **and** native `application/grpc` on the same port, so native
 gRPC clients pass through untouched.
 
 ## Links
 
-- **Repository:** https://github.com/debdattabasu/grpc_webnext
-- **Protocol spec (normative):** [`spec/PROTOCOL.md`](https://github.com/debdattabasu/grpc_webnext/blob/main/spec/PROTOCOL.md)
+- **Repository:** https://github.com/debdattabasu/grpc-webnext
+- **Protocol spec (normative):** [`spec/PROTOCOL.md`](https://github.com/debdattabasu/grpc-webnext/blob/main/spec/PROTOCOL.md)
 - **h2ts (HTTP/2 over WebSocket):** https://github.com/debdattabasu/h2ts
 
 ## License
 
-Dual-licensed under either [Apache-2.0](https://github.com/debdattabasu/grpc_webnext/blob/main/LICENSE-APACHE)
-or [MIT](https://github.com/debdattabasu/grpc_webnext/blob/main/LICENSE-MIT), at your option.
+Dual-licensed under either [Apache-2.0](https://github.com/debdattabasu/grpc-webnext/blob/main/LICENSE-APACHE)
+or [MIT](https://github.com/debdattabasu/grpc-webnext/blob/main/LICENSE-MIT), at your option.

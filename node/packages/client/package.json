@@ -4,14 +4,14 @@
   "description": "Full bidirectional gRPC client for the browser and Node — real HTTP/2 tunneled over WebSockets via h2ts, plus JSON over Fetch + WebSocket.",
   "license": "MIT OR Apache-2.0",
   "author": "Debdatta Basu",
-  "homepage": "https://github.com/debdattabasu/grpc_webnext#readme",
+  "homepage": "https://github.com/debdattabasu/grpc-webnext#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/debdattabasu/grpc_webnext.git",
+    "url": "git+https://github.com/debdattabasu/grpc-webnext.git",
     "directory": "node/packages/client"
   },
   "bugs": {
-    "url": "https://github.com/debdattabasu/grpc_webnext/issues"
+    "url": "https://github.com/debdattabasu/grpc-webnext/issues"
   },
   "keywords": [
     "grpc",

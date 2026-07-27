@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/debdattabasu/grpc_webnext"
+repository = "https://github.com/debdattabasu/grpc-webnext"
 
 [workspace.dependencies]
 grpc-webnext = { path = "crates/grpc-webnext" }
