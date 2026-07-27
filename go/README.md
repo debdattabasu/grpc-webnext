@@ -34,6 +34,34 @@ WebSocket upgrades hijack the connection — mounting it under a mux breaks both
 import "github.com/grpc-webnext/grpc-webnext/go/webnext"
 ```
 
+### Graceful shutdown
+
+`webnext.NewServer` mirrors `http.Server`, including `Shutdown`:
+
+```go
+srv := webnext.NewServer(grpcServer, webnext.ServerConfig{})
+go srv.Serve(listener)
+
+<-sigint
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+srv.Shutdown(ctx)   // refuse new RPCs, let in-flight ones finish
+```
+
+Draining means the same thing on every surface — refuse *new* RPCs, never cut a live one
+— using each one's native mechanism:
+
+| Surface | On drain |
+|---|---|
+| Fetch, native gRPC | HTTP/2 `GOAWAY`, or no-more-requests on HTTP/1 |
+| h2ts tunnel | a real `GOAWAY` down the tunnel — the same HTTP/2 server runs inside it |
+| custom-`Frame` WebSocket | no stream opened yet → closed with `1001 Going Away`; a live stream runs to its terminal frame, which closes the socket anyway |
+
+A long-lived stream holds the drain open until `ctx` expires — that is what graceful
+means. `Shutdown` returning `context.DeadlineExceeded` reports that stragglers are still
+there; it does not kill them. The package-level `Serve` / `BindAndServe` helpers have no
+drain; use `NewServer` when you need one.
+
 Enable the `+json` codec by supplying message descriptors:
 
 ```go
@@ -66,7 +94,7 @@ go/
   webnext/                    the library
     doc.go                    package overview
     config.go                 ServerConfig; content-type + subprotocol constants
-    server.go                 Handler / Serve / BindAndServe + the surface router
+    server.go                 Server (Serve/Shutdown), the surface router, drain tracking
     fetch.go                  unary over Fetch (+proto and +json)
     ws.go                     streaming over the custom `Frame` WebSocket protocol
     h2ts.go                   the real-HTTP/2 tunnel + its request-size limit

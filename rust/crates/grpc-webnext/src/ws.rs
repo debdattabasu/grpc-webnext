@@ -32,6 +32,11 @@ use tonic::{Code, Status};
 
 use crate::{Runtime, CT_GRPC, DEADLINE_GRACE};
 
+/// How long to wait for the peer's answering close after we send ours. The close
+/// handshake is politeness, not correctness — the terminal status was already delivered
+/// in a `Trailer`/`Reset` frame — so it is bounded rather than awaited indefinitely.
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 struct StreamState {
     /// Feeds request messages into the gRPC request body; `None` after half-close.
     req_tx: Option<mpsc::Sender<Bytes>>,
@@ -74,6 +79,9 @@ pub(crate) async fn serve(rt: Runtime, websocket: HyperWebsocket, reject: Option
     // Ready-to-send WebSocket messages: each frame encodes in the connection codec before
     // sending, which is what lets a connection whose codec is inferred from the first frame work.
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<TungMessage>(64);
+    // Signals the read loop that a close frame went out, so it can bound how long it
+    // waits for the peer's answering close instead of waiting forever.
+    let (closed_tx, mut closed_rx) = mpsc::channel::<()>(1);
 
     let writer = tokio::spawn(async move {
         let mut ping = keepalive.map(keepalive_interval);
@@ -81,7 +89,10 @@ pub(crate) async fn serve(rt: Runtime, websocket: HyperWebsocket, reject: Option
             tokio::select! {
                 msg = outbound_rx.recv() => {
                     let Some(msg) = msg else { break };
+                    let closing = matches!(msg, TungMessage::Close(_));
                     if ws_sink.send(msg).await.is_err() { break; }
+                    // Nothing follows a close frame.
+                    if closing { let _ = closed_tx.try_send(()); break; }
                 }
                 _ = next_tick(ping.as_mut()) => {
                     if ws_sink.send(TungMessage::Ping(Bytes::new())).await.is_err() { break; }
@@ -99,12 +110,38 @@ pub(crate) async fn serve(rt: Runtime, websocket: HyperWebsocket, reject: Option
     // The single stream on this connection.
     let mut stream: Option<StreamState> = None;
     let mut deadline = max_silence.map(|d| tokio::time::Instant::now() + d);
+    // Set once the server starts draining, so the branch below fires exactly once.
+    let mut draining = false;
+    // Armed once we have sent a close frame; bounds the wait for the peer's answer.
+    let mut close_deadline: Option<tokio::time::Instant> = None;
 
     loop {
         tokio::select! {
             _ = sleep_until(deadline) => {
                 tracing::debug!("ws keepalive: no pong within timeout; dropping connection");
                 break;
+            }
+            // We closed the socket and the peer never answered. A polite client echoes the
+            // close and the `Close` arm below ends the loop first; this bounds the rude and
+            // the dead ones, which would otherwise hold the connection — and, during a
+            // drain, the whole shutdown — open indefinitely.
+            _ = sleep_until(close_deadline) => {
+                tracing::debug!("ws close not answered within {CLOSE_GRACE:?}; dropping connection");
+                break;
+            }
+            Some(()) = closed_rx.recv(), if close_deadline.is_none() => {
+                close_deadline = Some(tokio::time::Instant::now() + CLOSE_GRACE);
+            }
+            // Graceful shutdown. This socket carries exactly one stream, so "stop
+            // accepting new streams" means: close it if it has not opened one yet, and
+            // otherwise leave it alone — a live stream runs to its terminal frame, which
+            // closes the socket anyway (see "Single-stream teardown" in PROTOCOL.md).
+            _ = rt.drain.wait(), if !draining => {
+                draining = true;
+                if stream.is_none() {
+                    let _ = outbound_tx.send(close_going_away()).await;
+                    break;
+                }
             }
             incoming = ws_stream.next() => {
                 let Some(incoming) = incoming else { break };
@@ -376,6 +413,16 @@ async fn send_reset(outbound_tx: &mpsc::Sender<TungMessage>, json: bool, code: C
         })),
     };
     let _ = outbound_tx.send(to_tung(&frame, json)).await;
+}
+
+/// A `1001 Going Away` close: the server is draining and this socket had not opened its
+/// stream yet. It carries no gRPC status — no RPC ever started — and a client reading it
+/// surfaces `UNAVAILABLE`, which is the retry-elsewhere signal a drain wants.
+fn close_going_away() -> TungMessage {
+    TungMessage::Close(Some(CloseFrame {
+        code: CloseCode::Away,
+        reason: "server draining".into(),
+    }))
 }
 
 /// A normal WebSocket close (code `1000`): the single stream on this connection has

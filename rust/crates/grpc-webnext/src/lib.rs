@@ -8,6 +8,7 @@
 //! [`Backend`]; the two entry points build one and run the identical handlers, so a client
 //! can't tell a wrapped response from a proxied one.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,7 @@ use tonic::transport::Channel;
 
 // Inbound protocol translation.
 pub mod backend;
+mod drain;
 mod fetch;
 mod h2ts;
 mod reflect;
@@ -43,6 +45,8 @@ pub mod httprule;
 pub mod json_frame;
 pub mod metadata;
 pub mod transcode;
+
+pub(crate) use drain::Drain;
 
 pub use backend::Backend;
 pub use schema::{Schema, SchemaSource};
@@ -163,20 +167,60 @@ pub(crate) struct RunConfig {
 
 /// Everything a connection needs: where to dispatch, how to transcode, and the policy.
 /// Cheap to clone.
+///
+/// Holding one also makes a task a *live connection* for shutdown purposes — the
+/// [`Drain`] inside carries the liveness token a drain waits on — so a task that
+/// outlives its connection must not keep a clone.
 #[derive(Clone)]
 pub(crate) struct Runtime {
     pub backend: Backend,
     pub schema: Schema,
     pub cfg: Arc<RunConfig>,
+    pub drain: Drain,
 }
 
 // --- Entry points -----------------------------------------------------------
 
-/// Serve grpc-webnext + native gRPC for an in-process `routes` on `listener`.
+/// Serve grpc-webnext + native gRPC for an in-process `routes` on `listener`, until the
+/// listener errors.
 pub async fn serve_in_process(
     listener: TcpListener,
     routes: Routes,
     config: ServerConfig,
+) -> std::io::Result<()> {
+    serve_in_process_with_shutdown(listener, routes, config, std::future::pending()).await
+}
+
+/// [`serve_in_process`], but draining once `shutdown` resolves.
+///
+/// Draining stops accepting connections, tells every open one to finish (an HTTP/2
+/// `GOAWAY` — including down an in-process h2ts tunnel — and a close on any WebSocket
+/// that has not opened its stream yet), lets in-flight RPCs complete, and resolves when
+/// the last connection is gone.
+///
+/// There is deliberately no drain-timeout knob: the returned future *is* the drain, so
+/// bounding it is [`tokio::time::timeout`], and dropping it force-closes whatever is
+/// still open. A long-lived stream will hold the drain open until then, which is what
+/// "graceful" means.
+///
+/// ```no_run
+/// # async fn f(listener: tokio::net::TcpListener, routes: tonic::service::Routes) {
+/// use std::time::Duration;
+/// let server = grpc_webnext::serve_in_process_with_shutdown(
+///     listener,
+///     routes,
+///     Default::default(),
+///     async { tokio::signal::ctrl_c().await.ok(); },
+/// );
+/// // Drain, but never take longer than 30s to exit.
+/// let _ = tokio::time::timeout(Duration::from_secs(30), server).await;
+/// # }
+/// ```
+pub async fn serve_in_process_with_shutdown(
+    listener: TcpListener,
+    routes: Routes,
+    config: ServerConfig,
+    shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
     let schema = Schema::from_transcoder(config.transcoder.clone());
     let cfg = Arc::new(RunConfig {
@@ -187,11 +231,28 @@ pub async fn serve_in_process(
         admin_reload_path: None,
         upstream_authority: None,
     });
-    run(listener, Runtime { backend: Backend::InProcess(routes), schema, cfg }).await
+    let (controller, drain) = drain::channel();
+    let rt = Runtime { backend: Backend::InProcess(routes), schema, cfg, drain };
+    run(listener, rt, controller, shutdown).await
 }
 
 /// Serve grpc-webnext + native gRPC passthrough in front of an upstream gRPC server.
 pub async fn serve_proxy(listener: TcpListener, config: ProxyConfig) -> std::io::Result<()> {
+    serve_proxy_with_shutdown(listener, config, std::future::pending()).await
+}
+
+/// [`serve_proxy`], but draining once `shutdown` resolves — see
+/// [`serve_in_process_with_shutdown`] for the semantics.
+///
+/// One surface drains differently here: the proxy's h2ts tunnels are a **byte-transparent**
+/// pump to the upstream, so there is no `GOAWAY` to inject without parsing the very traffic
+/// the proxy exists not to parse. Those tunnels run until the caller's deadline; every other
+/// surface drains as it does in-process.
+pub async fn serve_proxy_with_shutdown(
+    listener: TcpListener,
+    config: ProxyConfig,
+    shutdown: impl Future<Output = ()>,
+) -> std::io::Result<()> {
     // Lazy connect: the upstream need not be up when we start.
     let channel = Channel::builder(config.upstream.clone()).connect_lazy();
     // Raw host:port for the h2ts byte-pump path (which bypasses the gRPC `Channel`).
@@ -215,28 +276,53 @@ pub async fn serve_proxy(listener: TcpListener, config: ProxyConfig) -> std::io:
         admin_reload_path: config.admin_reload_path,
         upstream_authority,
     });
-    run(listener, Runtime { backend: Backend::Upstream(channel), schema, cfg }).await
+    let (controller, drain) = drain::channel();
+    let rt = Runtime { backend: Backend::Upstream(channel), schema, cfg, drain };
+    run(listener, rt, controller, shutdown).await
 }
 
 /// The connection accept loop, shared by both surfaces.
-async fn run(listener: TcpListener, rt: Runtime) -> std::io::Result<()> {
-    loop {
-        let (stream, _peer) = listener.accept().await?;
+async fn run(
+    listener: TcpListener,
+    rt: Runtime,
+    controller: drain::DrainController,
+    shutdown: impl Future<Output = ()>,
+) -> std::io::Result<()> {
+    let mut shutdown = std::pin::pin!(shutdown);
+    let result = loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            _ = shutdown.as_mut() => break Ok(()),
+        };
+        let (stream, _peer) = match accepted {
+            Ok(pair) => pair,
+            Err(e) => break Err(e),
+        };
         let io = TokioIo::new(stream);
         let rt = rt.clone();
         tokio::spawn(async move {
+            let drain = rt.drain.clone();
             let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                 let rt = rt.clone();
                 async move { fetch::handle(&rt, req).await }
             });
-            if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(io, service)
-                .await
-            {
+            // The connection borrows the builder, so the builder has to outlive it.
+            let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            let conn = builder.serve_connection_with_upgrades(io, service);
+            // Once draining starts this asks the connection to finish: `GOAWAY` on
+            // HTTP/2, no-more-requests on HTTP/1. In-flight requests still complete.
+            if let Err(e) = drain::serve_graceful!(&drain, conn) {
                 tracing::debug!("connection error: {e}");
             }
         });
-    }
+    };
+
+    // Dropping the listener stops accepting; dropping `rt` releases this task's own
+    // liveness token, without which the drain would wait on itself forever.
+    drop(listener);
+    drop(rt);
+    controller.finish().await;
+    result
 }
 
 /// Bind an ephemeral local address, serve an in-process `routes`, and return the bound

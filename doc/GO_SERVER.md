@@ -85,6 +85,42 @@ deliver its own terminal frame. Covered by
 `inproc_ws_close.rs::proto_ws_closes_after_size_limit_reset` and
 `server_test.go::TestWSOversizeMessageResets` / `TestWSOversizeInitialPayloadResets`.
 
+## Graceful shutdown (2026-07-27)
+
+Added afterwards, in both languages at once, since a drain has to mean the same thing on
+every surface or it is not one:
+
+- **Rust** — `serve_in_process_with_shutdown` / `serve_proxy_with_shutdown`. There is
+  deliberately no drain-timeout config knob: the returned future *is* the drain, so
+  `tokio::time::timeout` bounds it and dropping it force-closes. One knob fewer to
+  mis-set, and it composes.
+- **Go** — `webnext.NewServer` with `Serve` / `Shutdown(ctx)`, mirroring `http.Server`.
+
+Per surface: Fetch and native gRPC use the HTTP layer's own graceful shutdown; **h2ts
+tunnels get a real `GOAWAY`**, because both servers now own the HTTP/2 connection running
+inside the tunnel (Rust drives `hyper` over h2ts's `WsByteStream` rather than calling
+`serve_h2`; Go hands h2ts the server's own `*http2.Server`, which `http2.ConfigureServer`
+has wired to `Shutdown`); and a custom-`Frame` WebSocket with no stream yet is closed
+`1001 Going Away`, while one carrying a live stream runs to its terminal frame.
+
+The proxy's h2ts tunnels are the one surface that cannot drain gracefully: they are a
+byte-transparent pump, so there is no `GOAWAY` to inject without parsing the very traffic
+the proxy exists not to parse. Recorded rather than papered over.
+
+### Two more findings
+
+- **Rust waited forever for a client's close echo.** After sending its close frame the
+  server kept reading until the peer answered — so a client that receives the close and
+  stops reading pinned the connection open indefinitely, and during a drain held shutdown
+  open with it. Now bounded (`CLOSE_GRACE`, 5s), matching what the Go server already did.
+  The close handshake is politeness; the status was already delivered in the terminal
+  frame. Found because the drain test hung on exactly that.
+- **A `sync.WaitGroup` is the wrong tool for counting live connections in Go.** `Add` from
+  zero while `Wait` is running is documented misuse, and an HTTP/2 connection does exactly
+  that when a new stream arrives mid-drain — the race detector caught it on the first
+  `-race` run. Replaced with an explicit mutex-guarded counter that signals once draining
+  has begun and the count reaches zero.
+
 ## Recorded decisions (differences that are not bugs)
 
 - **Trailers-only responses.** tonic emits a gRPC error carrying no message as a genuine
@@ -110,8 +146,13 @@ deliver its own terminal frame. Covered by
   chunk boundaries, metadata, `grpc-timeout`, percent coding, JSON frame-kind priority) and
   end-to-end tests over real sockets covering all four RPC cardinalities on both codecs,
   deadlines, size limits, metadata fidelity, handshake rejection and codec inference,
-  keepalive pings, and native gRPC passthrough. Run under `-race` in CI, since a WebSocket
-  connection has a reader, a writer, and a keepalive ticker on it.
+  keepalive pings, native gRPC passthrough, and graceful shutdown. Run under `-race` in CI,
+  since a WebSocket connection has a reader, a writer, and a keepalive ticker on it — and
+  since that is what caught the WaitGroup misuse above.
+- The shutdown suites (`webnext/shutdown_test.go`, `tests/inproc_shutdown.rs`) test the two
+  failure modes that matter: a drain that returns too early cuts live RPCs, and one that
+  returns too late hangs a deploy. So every case asserts *both* that in-flight work
+  finished and that the drain actually ended.
 - The end-to-end tests drive the server with a **hand-written wire client**
   (`webnext/wireclient_test.go`) that re-implements the framing independently, so a bug in
   the server's codec cannot cancel itself out against the test's.

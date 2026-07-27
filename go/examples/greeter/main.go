@@ -8,15 +8,23 @@
 //
 //	go run ./examples/greeter            # ephemeral port
 //	go run ./examples/greeter 127.0.0.1:8080
+//
+// It also shows the shutdown shape: SIGINT drains — new RPCs are refused, in-flight
+// ones finish — bounded by a deadline, then the process exits.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -96,15 +104,40 @@ func main() {
 	grpcServer := grpc.NewServer()
 	pb.RegisterGreeterServer(grpcServer, greeter{})
 
-	bound, run, err := webnext.BindAndServe(addr, grpcServer, webnext.ServerConfig{
+	srv := webnext.NewServer(grpcServer, webnext.ServerConfig{
 		// Ping an otherwise-quiet stream so an idle-timeout proxy cannot drop it.
 		WSKeepalive: 30 * time.Second,
 	})
+
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal(err)
 	}
 	// The readiness convention the examples and the conformance harness share.
-	fmt.Printf("LISTENING http://%s\n", bound)
+	fmt.Printf("LISTENING http://%s\n", listener.Addr())
 	_ = os.Stdout.Sync()
-	log.Fatal(run())
+
+	serve := make(chan error, 1)
+	go func() { serve <- srv.Serve(listener) }()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	select {
+	case err := <-serve:
+		log.Fatal(err)
+	case sig := <-signals:
+		log.Printf("%v: draining…", sig)
+	}
+
+	// Refuse new RPCs, let the in-flight ones finish — but do not wait forever on a
+	// long-lived stream, because something upstream will not wait either.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("drain incomplete: %v", err)
+	}
+	if err := <-serve; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+	log.Print("stopped")
 }

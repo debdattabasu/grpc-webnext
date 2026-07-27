@@ -33,10 +33,15 @@ func (h *handler) serveH2TS(w http.ResponseWriter, r *http.Request) {
 	}
 	max := h.cfg.maxMessageBytes()
 	backend := h.backend
-	_ = h2ts.ServeH2(conn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	keepalive := h2ts.DefaultKeepAlive()
+	// Serving the tunnel with the *server's* HTTP/2 server, rather than letting
+	// h2ts make its own, is what puts this connection within reach of
+	// Server.Shutdown: it sends a real GOAWAY down the tunnel, so in-flight
+	// streams finish and no new ones start.
+	_ = h2ts.ServeH2With(conn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = &grpcSizeLimitReader{inner: r.Body, max: max}
 		backend.ServeHTTP(w, r)
-	}))
+	}), h2ts.ServeConfig{KeepAlive: &keepalive, Server: h.srv.h2})
 }
 
 // grpcSizeLimitReader passes a gRPC request body through unchanged but fails the

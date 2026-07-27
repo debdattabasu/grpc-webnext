@@ -29,7 +29,7 @@ go/             Go module github.com/grpc-webnext/grpc-webnext/go
 
 ```bash
 # Rust (server + proxy live in one crate). Run from rust/.
-cd rust && cargo test --workspace          # 83 tests
+cd rust && cargo test --workspace          # 91 tests
 cd rust && cargo clippy --workspace --all-targets   # keep clean
 
 # TypeScript. Install from the npm workspace root (node/), NOT from a package — npm

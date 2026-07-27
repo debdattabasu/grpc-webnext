@@ -274,6 +274,19 @@ delivered in the terminal frame, so the close carries no status. (This is the si
 analog of a stream-level teardown; the multiplexed h2ts path is a separate connection the
 server never owns, so it is not closed per-stream.)
 
+Having sent its close, the server waits only a **bounded** time for the peer's answering
+close before dropping the socket. The handshake is politeness — the status was already
+delivered in the terminal frame — so a client that never answers cannot pin the connection
+open (and, during a drain, cannot hold shutdown open with it).
+
+**Draining.** A server shutting down refuses *new* RPCs without cutting live ones. Because a
+socket carries exactly one stream, that distinction is per-socket: one that has **not yet
+opened its stream** is closed with **`1001 Going Away`**, and one carrying a live stream is
+left alone to reach its terminal frame. `1001` is not a `4000 + code` status close — no RPC
+ever started on that socket — and a client should read it the way it reads any transport
+loss: `UNAVAILABLE`, retry elsewhere. On the h2ts path the same intent is HTTP/2's own
+`GOAWAY`.
+
 ### Fetch error surfaces (no transcoder)
 
 - `+json`/JSON with **no** transcoder/schema configured → **`UNIMPLEMENTED` in the

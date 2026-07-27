@@ -114,10 +114,22 @@ func ptr[T any](v T) *T { return &v }
 type wsOutbound struct {
 	messageType int
 	data        []byte
-	// closeNormal marks the terminal message: the writer emits a normal (1000)
-	// close frame and stops.
-	closeNormal bool
+	// close, when set, makes the writer emit this close frame and stop. Nothing
+	// follows a close.
+	close *wsClose
 }
+
+// wsClose is a WebSocket close frame: `1000` when the socket's one stream has
+// terminated normally, `1001` when the server is draining and it never opened one.
+type wsClose struct {
+	code   int
+	reason string
+}
+
+var (
+	closeNormal    = &wsClose{code: websocket.CloseNormalClosure}
+	closeGoingAway = &wsClose{code: websocket.CloseGoingAway, reason: "server draining"}
+)
 
 // wsConn is the write side of one connection. A single goroutine owns the socket
 // writer, so frames, keepalive pings, and the close frame never interleave.
@@ -126,6 +138,10 @@ type wsConn struct {
 	out        chan wsOutbound
 	connDone   chan struct{} // closed when the read loop ends
 	writerDone chan struct{} // closed when the writer goroutine ends
+	// streamOpen tracks whether this socket's one stream has been opened, so the
+	// drain watcher can tell an idle socket from a working one without reaching
+	// into the read loop's state.
+	streamOpen atomic.Bool
 }
 
 // send queues a message, reporting false if the writer has already stopped (so a
@@ -174,6 +190,7 @@ func (h *handler) serveWS(conn *websocket.Conn, r *http.Request, codec *bool) {
 	}
 	defer close(c.connDone)
 	go h.runWriter(c)
+	go h.watchDrain(c)
 
 	// Keepalive: any inbound frame — a pong or ordinary stream data — proves
 	// liveness, so the read deadline *is* the silence timer. If nothing arrives
@@ -232,6 +249,22 @@ func (h *handler) serveWS(conn *websocket.Conn, r *http.Request, codec *bool) {
 	}
 }
 
+// watchDrain closes this socket if the server starts draining before it has opened
+// its one stream. A socket that *is* carrying a stream is left alone: the RPC runs
+// to its terminal frame, which closes the socket anyway (see "Single-stream
+// teardown" in spec/PROTOCOL.md). Racing a Subscribe that is arriving right now
+// only costs the client a retry, which is what a drain asks of it regardless.
+func (h *handler) watchDrain(c *wsConn) {
+	select {
+	case <-h.srv.draining:
+	case <-c.connDone:
+		return
+	}
+	if !c.streamOpen.Load() {
+		c.send(wsOutbound{close: closeGoingAway})
+	}
+}
+
 // runWriter owns every write to the socket: queued frames, keepalive pings, and
 // the terminal close frame.
 func (h *handler) runWriter(c *wsConn) {
@@ -247,12 +280,13 @@ func (h *handler) runWriter(c *wsConn) {
 	for {
 		select {
 		case m := <-c.out:
-			if m.closeNormal {
-				// The stream's status was already delivered in its terminal
-				// frame, so this close carries none. Bound the wait for the
-				// peer's close echo so the read loop cannot linger.
+			if m.close != nil {
+				// A terminal frame already carried the gRPC status (or, when
+				// draining an unused socket, there was never an RPC to report),
+				// so the close itself carries none. Bound the wait for the peer's
+				// close echo so the read loop cannot linger.
 				_ = c.conn.WriteControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+					websocket.FormatCloseMessage(m.close.code, m.close.reason),
 					time.Now().Add(wsCloseGrace))
 				_ = c.conn.SetReadDeadline(time.Now().Add(wsCloseGrace))
 				return
@@ -342,11 +376,12 @@ func (h *handler) handleFrame(r *http.Request, c *wsConn, frame *pb.Frame, jsonC
 		// An opening frame may carry the first message inline; hold it to the limit.
 		if len(sub.GetInitialPayload()) > h.cfg.maxMessageBytes() {
 			sendReset(c, jsonCodec, codes.ResourceExhausted, "request message exceeds size limit")
-			c.send(wsOutbound{closeNormal: true})
+			c.send(wsOutbound{close: closeNormal})
 			return
 		}
 		ctx, cancel := context.WithCancel(r.Context())
 		s := &wsStream{requests: make(chan []byte, 16), ctx: ctx, cancel: cancel}
+		c.streamOpen.Store(true)
 		if payload := sub.GetInitialPayload(); len(payload) > 0 {
 			s.requests <- payload // the buffer is empty, so this cannot block
 		}
@@ -360,10 +395,11 @@ func (h *handler) handleFrame(r *http.Request, c *wsConn, frame *pb.Frame, jsonC
 			if s := *stream; s != nil {
 				s.abort()
 				*stream = nil
+				c.streamOpen.Store(false)
 			}
 			// The stream has reached its terminal frame, so the socket — which
 			// carries exactly this one stream — has served its purpose.
-			c.send(wsOutbound{closeNormal: true})
+			c.send(wsOutbound{close: closeNormal})
 			return
 		}
 		if s := *stream; s != nil && !s.halfClosed {
@@ -386,6 +422,7 @@ func (h *handler) handleFrame(r *http.Request, c *wsConn, frame *pb.Frame, jsonC
 		if s := *stream; s != nil {
 			s.abort()
 			*stream = nil
+			c.streamOpen.Store(false)
 		}
 	}
 }
@@ -527,7 +564,7 @@ func (h *handler) finishStream(c *wsConn, s *wsStream, jsonCodec bool, trailer *
 	if !c.sendFrame(&pb.Frame{Kind: &pb.Frame_Trailer{Trailer: trailer}}, jsonCodec) {
 		return
 	}
-	c.send(wsOutbound{closeNormal: true})
+	c.send(wsOutbound{close: closeNormal})
 }
 
 // rejectStream ends the stream with a Reset — the status for a stream rejected
@@ -537,7 +574,7 @@ func (h *handler) rejectStream(c *wsConn, s *wsStream, jsonCodec bool, code code
 		return
 	}
 	sendReset(c, jsonCodec, code, message)
-	c.send(wsOutbound{closeNormal: true})
+	c.send(wsOutbound{close: closeNormal})
 }
 
 func sendReset(c *wsConn, jsonCodec bool, code codes.Code, message string) {

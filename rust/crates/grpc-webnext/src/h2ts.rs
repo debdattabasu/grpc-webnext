@@ -21,6 +21,7 @@ use bytes::Bytes;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Frame as HttpBodyFrame, Incoming, SizeHint};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpStream;
 use tonic::body::Body as TonicBody;
 use tonic::Status;
@@ -60,8 +61,16 @@ pub(crate) fn serve(rt: &Runtime, req: &mut Request<Incoming>) -> Response<ResBo
                         routes.oneshot(req).await
                     }
                 });
-                if let Err(e) = h2ts_server::serve_h2(ws, service).await {
-                    tracing::debug!("h2ts serve_h2 ended: {e}");
+                // Own the inner HTTP/2 connection rather than calling
+                // `h2ts_server::serve_h2`, which is these same two lines without handing
+                // back the connection: holding it is what lets a drain send a real
+                // `GOAWAY` down the tunnel. `WsByteStream` is h2ts's supported handle for
+                // exactly this — the tunnel as a byte stream, bridged incrementally.
+                let io = TokioIo::new(h2ts_server::WsByteStream::new(ws));
+                let builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+                let conn = builder.serve_connection(io, service);
+                if let Err(e) = crate::drain::serve_graceful!(&rt.drain, conn) {
+                    tracing::debug!("h2ts connection ended: {e}");
                 }
             }
             // Byte-transparent tunnel to the h2c upstream — no gRPC parsing.

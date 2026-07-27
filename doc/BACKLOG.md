@@ -96,10 +96,18 @@ tonic `Routes` (Rust) or a `*grpc.Server` (Go). Deferred:
 - [x] ~~**`+json` is binary-only (UNIMPLEMENTED).**~~ **Done** — descriptor-based
   transcoding via `ServerConfig::transcoder`, which is what the Codec section below
   already recorded. (This entry contradicted it; closed in the 2026-07-27 sweep.)
-- [ ] **Graceful shutdown / drain** is not wired, in Rust *or* Go: the accept loop runs
-  until the task is dropped (`serve_in_process`), and the Go side hands a listener to
-  `http.Server.Serve` with no `Shutdown` path exposed. Wanted: stop accepting, let
-  in-flight RPCs finish, `GOAWAY`/close idle WebSockets, bounded by a drain deadline.
+- [x] ~~**Graceful shutdown / drain.**~~ **Done (2026-07-27)**, in Rust and Go, across all
+  four surfaces. Rust adds `serve_in_process_with_shutdown` / `serve_proxy_with_shutdown`
+  (the returned future *is* the drain, so `tokio::time::timeout` bounds it and dropping it
+  force-closes — no drain-timeout knob to get wrong); Go adds `webnext.NewServer` with
+  `Serve`/`Shutdown(ctx)`, mirroring `http.Server`. Fetch and native gRPC drain via hyper's
+  own `graceful_shutdown` / `http.Server.Shutdown`; h2ts tunnels get a real `GOAWAY`,
+  because both servers now own the HTTP/2 connection running inside the tunnel; a
+  custom-`Frame` WebSocket with no stream yet is closed `1001`, and one with a live stream
+  runs to its terminal frame. Covered by `tests/inproc_shutdown.rs` and
+  `webnext/shutdown_test.go`. **Not drainable by design:** the *proxy's* h2ts tunnels are a
+  byte-transparent pump, so there is no `GOAWAY` to inject without parsing the traffic the
+  proxy exists not to parse — those run until the caller's deadline.
 - [x] ~~**Per-WS max-concurrent-streams cap** and idle cleanup.~~ **Moot** — a WebSocket
   carries exactly one stream, so the cap is 1 by construction (a second `Subscribe` is
   answered `Reset{INVALID_ARGUMENT, "stream already open"}`). Idle cleanup is covered by
