@@ -92,7 +92,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: node/packages/client/package-lock.json
+          cache-dependency-path: node/package-lock.json
 
       # Those suites wait 60s for `LISTENING …` after `cargo run`; a cold compile inside
       # the test would blow that budget, so build the servers up front.
@@ -100,25 +100,21 @@ jobs:
         working-directory: rust
         run: cargo build --locked -p devserver -p example-greeter-server -p conformance-server
 
-      # Install from the client package (it carries the lockfile the project actually
-      # uses — node/package-lock.json is a stale remnant of the pre-monorepo layout).
+      # Install/build/test from the workspace root: npm resolves a member install to the
+      # root anyway, so node/package-lock.json is the lockfile that actually governs the
+      # tree — and it is the one that carries every platform's optional binaries.
       - name: Install
-        working-directory: node/packages/client
+        working-directory: node
         run: npm ci
 
+      # Both workspaces: the client, and the server skeleton (typechecked, not left to rot).
       - name: Build
-        working-directory: node/packages/client
+        working-directory: node
         run: npm run build
-
-      # The server skeleton has no deps of its own; borrow the client's tsc so the
-      # package is still typechecked rather than silently rotting.
-      - name: Typecheck the server skeleton
-        working-directory: node/packages/server
-        run: ../client/node_modules/.bin/tsc -p tsconfig.json --noEmit
 
       # Unit + e2e + the conformance matrix (cases × transports × codecs).
       - name: Test
-        working-directory: node/packages/client
+        working-directory: node
         run: npm test
 
   go:
