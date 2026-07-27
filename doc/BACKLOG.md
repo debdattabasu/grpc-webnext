@@ -198,8 +198,10 @@ needing verification.
   reading) and maps `(HTTP method, path)` onto a gRPC method, binding path segments,
   query params, and the body into the request message. The native server tries a REST
   match first and falls back to a direct `/pkg.Service/Method` JSON call. Covered by
-  `server/tests/json.rs` (`transcode_*`). The google/api protos are vendored under
-  `crates/testecho/proto/google/api/` for the test service.
+  `server/tests/json.rs` (`transcode_*`). The google/api protos are vendored **once**, at
+  `/proto/google/api/`, and included from there by every consumer (the Rust test service,
+  the conformance protos, and the Go/TS codegen) — moved there on 2026-07-27 when the
+  conformance suite started needing them too.
 - [ ] **Unsupported HttpRule bits.** Audited in full on 2026-07-27 alongside the Go port;
   every item, what it actually does when you use it, and whether it's worth fixing is in
   [doc/HTTPRULE_GAPS.md](HTTPRULE_GAPS.md), with a test pinning each. The list is
@@ -224,7 +226,10 @@ needing verification.
 - [x] ~~REST transcoding in the proxy (2026-07-05).~~ Done on both Fetch and WebSocket;
   see the proxy section above for details and the reflection option-preservation caveat.
 - [ ] **Client-side REST helper** — the generated TS client still calls the gRPC-style
-  path; there's no helper to construct the annotated REST URL from the client.
+  path; there's no helper to construct the annotated REST URL from the client. Note the
+  conformance driver deliberately does *not* want one (it proves an annotated URL needs no
+  SDK by using a raw HTTP client), so this is purely an ergonomics item for application
+  code that wants to hit a REST alias through the typed client.
 - [x] ~~Surface model (two rules).~~ (1) Plain HTTP (`application/json`/blank) reaches
   annotated REST endpoints always, and main gRPC paths only with
   `ServerConfig::allow_implicit_codec` (off by default). (2) grpc-webnext is the SDK:
@@ -250,14 +255,16 @@ needing verification.
   annotated endpoints accept plain HTTP unconditionally), and an annotation-matching WS
   upgrade becomes a text-locked single-stream JSON route. `go/webnext` now serves **every**
   spec surface. See `doc/GO_SERVER.md`.
-- [ ] **REST conformance cases.** The pairing this was meant to have: two implementations
-  now serve REST and nothing cross-checks them. Two blockers, both real — `conformance.proto`
-  carries no annotations (adding them makes every implementation vendor `google/api/*.proto`),
-  and a REST case is a raw `(verb, URL, body)` rather than an RPC, which the TS driver has
-  no helper for (that helper is the "Client-side REST helper" item above — the two want
-  doing together). The stopgap in place meanwhile: both servers' REST tests drive the same
-  `echo.proto` annotations through the same URLs, each Go test naming its Rust counterpart.
-  Agreement by construction, not by harness; recorded as such in `conformance/README.md`.
+- [x] ~~**REST conformance cases.**~~ **Done (2026-07-27.)** `conformance/cases/rest.yaml`
+  — 18 cases × 2 servers — covers `body:"*"` on both surfaces, path/query binding,
+  `additional_bindings`, binding precedence, status/metadata fidelity, and both
+  wrong-surface rejections. Both anticipated blockers were paid rather than dodged:
+  `conformance.proto` now imports `google/api/annotations.proto`, vendored **once** at
+  `/proto/google/api` and included from there by all three toolchains; and the driver runs
+  a `rest:` case with a **raw HTTP client** instead of the grpc-webnext one, which is the
+  claim being tested (an annotated URL should need no SDK). A `rest:` case therefore runs
+  once, not once per transport/codec profile. Found a build bug on its first run — see
+  `conformance/README.md`.
 
 ## WebSocket streams / multiplexing
 

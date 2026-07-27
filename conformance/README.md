@@ -92,11 +92,35 @@ grammar. Current coverage:
 | streaming | [cases/streaming.yaml](cases/streaming.yaml) | server-stream (incl. messages-then-error), client-stream aggregate, bidi echo, client cancel → CANCELLED |
 | deadline | [cases/deadline.yaml](cases/deadline.yaml) | unary + stream `grpc-timeout` expiry (DEADLINE_EXCEEDED); within-deadline passes |
 | limits | [cases/limits.yaml](cases/limits.yaml) | oversize request rejected on every path, large response intact, `+json` w/o transcoder → UNIMPLEMENTED, ASCII+`-bin` metadata round-trip on **both** Fetch and WebSocket |
+| rest | [cases/rest.yaml](cases/rest.yaml) | `google.api.http` routes: `body:"*"` on Fetch and WebSocket, path/query binding, `additional_bindings`, binding precedence, status + metadata across the REST surface, and both wrong-surface rejections |
 
 Each case runs under every applicable **transport profile** — `proto/h2ts` (real gRPC over
 the h2ts tunnel), `proto/ws` (the custom `Frame` path, unary over Fetch), and `json` (the
-custom path, Fetch + WS) — against **every server implementation**. 47 case×profile runs per
+custom path, Fetch + WS) — against **every server implementation**. 65 case×profile runs per
 server, Rust and Go, all green.
+
+### REST cases are different, on purpose
+
+A `rest:` case names a URL, a verb, and a raw JSON body, and the driver issues an **ordinary
+HTTP request** — it does not go through the grpc-webnext client at all. That is the claim
+being tested: an annotated endpoint is supposed to be reachable by anything that speaks JSON
+over HTTP, so proving it with a client that knows the protocol would prove nothing.
+
+Consequently a REST case runs **once**, not once per profile: the URL already fixes the
+codec (annotated endpoints are JSON-only) and the RPC's cardinality already fixes the
+transport (a unary annotation URL is Fetch, a streaming one is a WebSocket — the spec's
+rule, not the driver's choice). What the matrix still contributes is the part that matters:
+every REST case runs against **every server implementation**.
+
+Two conventions worth knowing before writing one:
+
+- **Rejections.** A Fetch-surface refusal never becomes an RPC, so it is asserted with
+  `expect.http_status` (e.g. `+proto` on a REST URL is `415`). A WebSocket refusal *does*
+  carry a status — the `4000 + code` close — so it is asserted as an ordinary
+  `expect.status.code`, exactly as a browser would read it.
+- **One request message.** `rest.body` is a single JSON document, so the driver sends one
+  request frame and half-closes. That covers unary and server-streaming annotation routes;
+  a multi-message bidi REST case would need the schema to grow a list first.
 
 **Design notes** (surfaced by the run — behavior pinned, not gaps):
 - **Size limits are request-only, by design.** `max_message_bytes` bounds inbound *request*
@@ -123,22 +147,22 @@ case (`metadata-roundtrip-websocket`). **When a case's `transports:` includes `w
 check that the RPC is actually a streaming one** — otherwise the WebSocket surface goes
 unproven.
 
-**Not yet covered** (tracked, not silently omitted): WebSocket keepalive/idle-timeout,
-connection-level auth (Subscribe rejection), REST/HttpRule transcoding routes, half-close
-ordering edge cases. Add these as new suites; extend the table when you do.
+Adding the **REST** suite (2026-07-27) found a third, and this one was in the *build* rather
+than the protocol: `conformance-server/build.rs` compiled a proto living outside its own
+package, and cargo's "rerun if the package changed" heuristic does not watch those. So the
+Rust server kept serving **last build's descriptor set** — an annotation added to
+`conformance.proto` simply never appeared, surfacing as a REST route that 415'd for no
+reason. Both build scripts now declare their out-of-package inputs with
+`cargo:rerun-if-changed`. Worth internalizing: a conformance suite that runs against a stale
+artifact is not a weaker guard, it is a *lying* one, and only a case that failed for a
+protocol reason it couldn't explain exposed it.
 
-REST is the largest of those, and now the most costly: **both** servers serve
-`google.api.http` routes (Go joined Rust on 2026-07-27), so there are two implementations
-with nothing cross-checking them here. Two things stand in the way, and both are backlog
-items in their own right: `conformance.proto` carries no annotations — adding them means
-every implementation must vendor `google/api/*.proto` — and a REST case is a raw
-`(verb, URL, body)` rather than an RPC, which the TS client driver has no helper for.
-Until that lands, the stand-in is a **shared fixture**: both servers' REST tests drive the
-same [`echo.proto`](../rust/crates/testecho/proto/echo.proto) annotations through the same
-URLs, each Go test naming its Rust counterpart
-([`go/webnext/httprule_e2e_test.go`](../go/webnext/httprule_e2e_test.go)). That is weaker
-than the matrix — two suites agreeing by construction, not one harness proving it — so it
-is a stopgap, not a substitute.
+**Not yet covered** (tracked, not silently omitted): WebSocket keepalive/idle-timeout,
+connection-level auth (Subscribe rejection), half-close ordering edge cases, and — within
+REST — multi-message bidi annotation routes (the `rest.body` schema holds one document) and
+the unsupported HttpRule features in [`/doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md),
+which are shared by both implementations and pinned by per-language tests instead. Add these
+as new suites; extend the table when you do.
 
 ## Running
 

@@ -160,15 +160,21 @@ collided on the first-declared. Fixed in Rust and Go together: the verb rides on
 binding and is matched in both directions. Full write-up, plus every remaining gap and
 what it actually does, in [HTTPRULE_GAPS.md](HTTPRULE_GAPS.md).
 
-### Coverage, and its honest limit
+### Coverage
 
-The Go REST tests drive the **same** `echo.proto` annotations the Rust tests drive, through
-the same URLs, with each Go test naming its Rust counterpart. That is deliberate: two
-implementations of one contract need something asserting they answer alike, and
-`conformance/` cannot yet do it for REST (the conformance proto carries no annotations, and
-a REST case is a raw `(verb, URL, body)` the TS driver has no helper for). So this is
-agreement *by construction* rather than agreement *proved by one harness* — a stopgap, and
-recorded as one in `conformance/README.md`.
+Two layers, and they answer different questions.
+
+The **conformance suite** now covers REST (`conformance/cases/rest.yaml`, added the same
+day): `conformance.proto` carries `google.api.http` annotations, and the driver hits them
+with a **raw HTTP client** rather than the grpc-webnext one — which is the claim being
+tested, since an annotated URL is supposed to need no SDK. That is one harness proving both
+servers answer alike, which is what the matrix is for.
+
+The **per-language tests** cover what the matrix structurally cannot: the unsupported
+HttpRule features (a shared subset, pinned per language — see `HTTPRULE_GAPS.md`), and the
+router internals. The Go REST tests additionally drive the **same** `echo.proto` annotations
+the Rust tests drive, through the same URLs, each naming its Rust counterpart — belt and
+braces on top of the matrix rather than, as it was for a few hours, a substitute for it.
 
 ## Recorded decisions (differences that are not bugs)
 

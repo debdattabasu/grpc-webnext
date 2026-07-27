@@ -19,11 +19,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protodesc"
-	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/types/descriptorpb"
 
+	"github.com/grpc-webnext/grpc-webnext/go/internal/protoset"
 	pb "github.com/grpc-webnext/grpc-webnext/go/internal/testecho/testechopb"
 )
 
@@ -49,29 +46,10 @@ func Register(s grpc.ServiceRegistrar) { pb.RegisterEchoServer(s, New(0)) }
 
 // DescriptorSet is the encoded FileDescriptorSet the `+json` transcoder and the
 // HTTP router are built from — assembled from the descriptors compiled into the
-// generated package, so no side-car `.bin` file is needed.
-//
-// Unlike the conformance proto, echo.proto has imports (`google/api/…`), so the
-// whole import closure goes in — the equivalent of `protoc --include_imports`,
-// without which building the pool fails on an unresolved dependency.
+// generated package, so no side-car `.bin` file is needed. echo.proto has imports
+// (`google/api/…`), so the whole closure goes in; see the protoset package.
 func DescriptorSet() ([]byte, error) {
-	var files []*descriptorpb.FileDescriptorProto
-	seen := map[string]bool{}
-	// Post-order: a file's dependencies must precede it in the set.
-	var add func(fd protoreflect.FileDescriptor)
-	add = func(fd protoreflect.FileDescriptor) {
-		if seen[fd.Path()] {
-			return
-		}
-		seen[fd.Path()] = true
-		imports := fd.Imports()
-		for i := 0; i < imports.Len(); i++ {
-			add(imports.Get(i).FileDescriptor)
-		}
-		files = append(files, protodesc.ToFileDescriptorProto(fd))
-	}
-	add(pb.File_echo_proto)
-	return proto.Marshal(&descriptorpb.FileDescriptorSet{File: files})
+	return protoset.Marshal(pb.File_echo_proto)
 }
 
 func (*Service) Unary(_ context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {

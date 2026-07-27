@@ -23,6 +23,7 @@
 package conformancepb
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -36,6 +37,128 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// A REST-shaped unary request: every field is bindable from a URL.
+type RestUnaryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Payload       string                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`                          // echoed back as ConformancePayload.payload (UTF-8)
+	StatusCode    uint32                 `protobuf:"varint,2,opt,name=status_code,json=statusCode,proto3" json:"status_code,omitempty"` // non-zero => terminal error, so REST error paths are testable
+	StatusMessage string                 `protobuf:"bytes,3,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RestUnaryRequest) Reset() {
+	*x = RestUnaryRequest{}
+	mi := &file_conformance_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RestUnaryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RestUnaryRequest) ProtoMessage() {}
+
+func (x *RestUnaryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_conformance_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RestUnaryRequest.ProtoReflect.Descriptor instead.
+func (*RestUnaryRequest) Descriptor() ([]byte, []int) {
+	return file_conformance_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *RestUnaryRequest) GetPayload() string {
+	if x != nil {
+		return x.Payload
+	}
+	return ""
+}
+
+func (x *RestUnaryRequest) GetStatusCode() uint32 {
+	if x != nil {
+		return x.StatusCode
+	}
+	return 0
+}
+
+func (x *RestUnaryRequest) GetStatusMessage() string {
+	if x != nil {
+		return x.StatusMessage
+	}
+	return ""
+}
+
+// A REST-shaped server-streaming request.
+type RestStreamRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Payload       string                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`                          // emitted `count` times
+	Count         uint32                 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`                             // bound from a query param, exercising uint32 coercion
+	StatusCode    uint32                 `protobuf:"varint,3,opt,name=status_code,json=statusCode,proto3" json:"status_code,omitempty"` // non-zero => terminal error after the messages
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RestStreamRequest) Reset() {
+	*x = RestStreamRequest{}
+	mi := &file_conformance_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RestStreamRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RestStreamRequest) ProtoMessage() {}
+
+func (x *RestStreamRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_conformance_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RestStreamRequest.ProtoReflect.Descriptor instead.
+func (*RestStreamRequest) Descriptor() ([]byte, []int) {
+	return file_conformance_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *RestStreamRequest) GetPayload() string {
+	if x != nil {
+		return x.Payload
+	}
+	return ""
+}
+
+func (x *RestStreamRequest) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *RestStreamRequest) GetStatusCode() uint32 {
+	if x != nil {
+		return x.StatusCode
+	}
+	return 0
+}
 
 // How the server should respond. Present on unary requests and the first request of
 // a streaming RPC; ignored on subsequent streaming requests.
@@ -65,7 +188,7 @@ type ResponseDefinition struct {
 
 func (x *ResponseDefinition) Reset() {
 	*x = ResponseDefinition{}
-	mi := &file_conformance_proto_msgTypes[0]
+	mi := &file_conformance_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -77,7 +200,7 @@ func (x *ResponseDefinition) String() string {
 func (*ResponseDefinition) ProtoMessage() {}
 
 func (x *ResponseDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[0]
+	mi := &file_conformance_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -90,7 +213,7 @@ func (x *ResponseDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResponseDefinition.ProtoReflect.Descriptor instead.
 func (*ResponseDefinition) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{0}
+	return file_conformance_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ResponseDefinition) GetStatusCode() uint32 {
@@ -159,7 +282,7 @@ type StreamMessage struct {
 
 func (x *StreamMessage) Reset() {
 	*x = StreamMessage{}
-	mi := &file_conformance_proto_msgTypes[1]
+	mi := &file_conformance_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -171,7 +294,7 @@ func (x *StreamMessage) String() string {
 func (*StreamMessage) ProtoMessage() {}
 
 func (x *StreamMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[1]
+	mi := &file_conformance_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -184,7 +307,7 @@ func (x *StreamMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamMessage.ProtoReflect.Descriptor instead.
 func (*StreamMessage) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{1}
+	return file_conformance_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *StreamMessage) GetPayload() []byte {
@@ -211,7 +334,7 @@ type UnaryRequest struct {
 
 func (x *UnaryRequest) Reset() {
 	*x = UnaryRequest{}
-	mi := &file_conformance_proto_msgTypes[2]
+	mi := &file_conformance_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -223,7 +346,7 @@ func (x *UnaryRequest) String() string {
 func (*UnaryRequest) ProtoMessage() {}
 
 func (x *UnaryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[2]
+	mi := &file_conformance_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -236,7 +359,7 @@ func (x *UnaryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnaryRequest.ProtoReflect.Descriptor instead.
 func (*UnaryRequest) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{2}
+	return file_conformance_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *UnaryRequest) GetPayload() []byte {
@@ -262,7 +385,7 @@ type ServerStreamRequest struct {
 
 func (x *ServerStreamRequest) Reset() {
 	*x = ServerStreamRequest{}
-	mi := &file_conformance_proto_msgTypes[3]
+	mi := &file_conformance_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -274,7 +397,7 @@ func (x *ServerStreamRequest) String() string {
 func (*ServerStreamRequest) ProtoMessage() {}
 
 func (x *ServerStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[3]
+	mi := &file_conformance_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -287,7 +410,7 @@ func (x *ServerStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerStreamRequest.ProtoReflect.Descriptor instead.
 func (*ServerStreamRequest) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{3}
+	return file_conformance_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ServerStreamRequest) GetResponseDefinition() *ResponseDefinition {
@@ -307,7 +430,7 @@ type ClientStreamRequest struct {
 
 func (x *ClientStreamRequest) Reset() {
 	*x = ClientStreamRequest{}
-	mi := &file_conformance_proto_msgTypes[4]
+	mi := &file_conformance_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -319,7 +442,7 @@ func (x *ClientStreamRequest) String() string {
 func (*ClientStreamRequest) ProtoMessage() {}
 
 func (x *ClientStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[4]
+	mi := &file_conformance_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -332,7 +455,7 @@ func (x *ClientStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientStreamRequest.ProtoReflect.Descriptor instead.
 func (*ClientStreamRequest) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{4}
+	return file_conformance_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ClientStreamRequest) GetPayload() []byte {
@@ -360,7 +483,7 @@ type ClientStreamResponse struct {
 
 func (x *ClientStreamResponse) Reset() {
 	*x = ClientStreamResponse{}
-	mi := &file_conformance_proto_msgTypes[5]
+	mi := &file_conformance_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -372,7 +495,7 @@ func (x *ClientStreamResponse) String() string {
 func (*ClientStreamResponse) ProtoMessage() {}
 
 func (x *ClientStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[5]
+	mi := &file_conformance_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -385,7 +508,7 @@ func (x *ClientStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientStreamResponse.ProtoReflect.Descriptor instead.
 func (*ClientStreamResponse) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{5}
+	return file_conformance_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ClientStreamResponse) GetPayload() *ConformancePayload {
@@ -419,7 +542,7 @@ type BidiStreamRequest struct {
 
 func (x *BidiStreamRequest) Reset() {
 	*x = BidiStreamRequest{}
-	mi := &file_conformance_proto_msgTypes[6]
+	mi := &file_conformance_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -431,7 +554,7 @@ func (x *BidiStreamRequest) String() string {
 func (*BidiStreamRequest) ProtoMessage() {}
 
 func (x *BidiStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[6]
+	mi := &file_conformance_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -444,7 +567,7 @@ func (x *BidiStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BidiStreamRequest.ProtoReflect.Descriptor instead.
 func (*BidiStreamRequest) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{6}
+	return file_conformance_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *BidiStreamRequest) GetPayload() []byte {
@@ -473,7 +596,7 @@ type ConformancePayload struct {
 
 func (x *ConformancePayload) Reset() {
 	*x = ConformancePayload{}
-	mi := &file_conformance_proto_msgTypes[7]
+	mi := &file_conformance_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -485,7 +608,7 @@ func (x *ConformancePayload) String() string {
 func (*ConformancePayload) ProtoMessage() {}
 
 func (x *ConformancePayload) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[7]
+	mi := &file_conformance_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -498,7 +621,7 @@ func (x *ConformancePayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConformancePayload.ProtoReflect.Descriptor instead.
 func (*ConformancePayload) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{7}
+	return file_conformance_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ConformancePayload) GetPayload() []byte {
@@ -524,7 +647,7 @@ type ClientStreamResponseInfo struct {
 
 func (x *ClientStreamResponseInfo) Reset() {
 	*x = ClientStreamResponseInfo{}
-	mi := &file_conformance_proto_msgTypes[8]
+	mi := &file_conformance_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -536,7 +659,7 @@ func (x *ClientStreamResponseInfo) String() string {
 func (*ClientStreamResponseInfo) ProtoMessage() {}
 
 func (x *ClientStreamResponseInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[8]
+	mi := &file_conformance_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -549,7 +672,7 @@ func (x *ClientStreamResponseInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientStreamResponseInfo.ProtoReflect.Descriptor instead.
 func (*ClientStreamResponseInfo) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{8}
+	return file_conformance_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ClientStreamResponseInfo) GetReceivedCount() uint32 {
@@ -571,7 +694,7 @@ type RequestInfo struct {
 
 func (x *RequestInfo) Reset() {
 	*x = RequestInfo{}
-	mi := &file_conformance_proto_msgTypes[9]
+	mi := &file_conformance_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +706,7 @@ func (x *RequestInfo) String() string {
 func (*RequestInfo) ProtoMessage() {}
 
 func (x *RequestInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[9]
+	mi := &file_conformance_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +719,7 @@ func (x *RequestInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestInfo.ProtoReflect.Descriptor instead.
 func (*RequestInfo) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{9}
+	return file_conformance_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RequestInfo) GetRequestHeaders() []*Metadatum {
@@ -635,7 +758,7 @@ type Metadatum struct {
 
 func (x *Metadatum) Reset() {
 	*x = Metadatum{}
-	mi := &file_conformance_proto_msgTypes[10]
+	mi := &file_conformance_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -647,7 +770,7 @@ func (x *Metadatum) String() string {
 func (*Metadatum) ProtoMessage() {}
 
 func (x *Metadatum) ProtoReflect() protoreflect.Message {
-	mi := &file_conformance_proto_msgTypes[10]
+	mi := &file_conformance_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -660,7 +783,7 @@ func (x *Metadatum) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Metadatum.ProtoReflect.Descriptor instead.
 func (*Metadatum) Descriptor() ([]byte, []int) {
-	return file_conformance_proto_rawDescGZIP(), []int{10}
+	return file_conformance_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Metadatum) GetKey() string {
@@ -715,7 +838,17 @@ var File_conformance_proto protoreflect.FileDescriptor
 
 const file_conformance_proto_rawDesc = "" +
 	"\n" +
-	"\x11conformance.proto\x12\x1bgrpc.webnext.conformance.v1\"\xa4\x03\n" +
+	"\x11conformance.proto\x12\x1bgrpc.webnext.conformance.v1\x1a\x1cgoogle/api/annotations.proto\"t\n" +
+	"\x10RestUnaryRequest\x12\x18\n" +
+	"\apayload\x18\x01 \x01(\tR\apayload\x12\x1f\n" +
+	"\vstatus_code\x18\x02 \x01(\rR\n" +
+	"statusCode\x12%\n" +
+	"\x0estatus_message\x18\x03 \x01(\tR\rstatusMessage\"d\n" +
+	"\x11RestStreamRequest\x12\x18\n" +
+	"\apayload\x18\x01 \x01(\tR\apayload\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\rR\x05count\x12\x1f\n" +
+	"\vstatus_code\x18\x03 \x01(\rR\n" +
+	"statusCode\"\xa4\x03\n" +
 	"\x12ResponseDefinition\x12\x1f\n" +
 	"\vstatus_code\x18\x01 \x01(\rR\n" +
 	"statusCode\x12%\n" +
@@ -758,13 +891,15 @@ const file_conformance_proto_rawDesc = "" +
 	"\vascii_value\x18\x02 \x01(\tH\x00R\n" +
 	"asciiValue\x12\x1d\n" +
 	"\tbin_value\x18\x03 \x01(\fH\x00R\bbinValueB\a\n" +
-	"\x05value2\xd8\x03\n" +
-	"\x12ConformanceService\x12c\n" +
-	"\x05Unary\x12).grpc.webnext.conformance.v1.UnaryRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\x12s\n" +
-	"\fServerStream\x120.grpc.webnext.conformance.v1.ServerStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload0\x01\x12u\n" +
+	"\x05value2\xda\x06\n" +
+	"\x12ConformanceService\x12y\n" +
+	"\x05Unary\x12).grpc.webnext.conformance.v1.UnaryRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"\x14\x82\xd3\xe4\x93\x02\x0e:\x01*\"\t/v1/unary\x12\x91\x01\n" +
+	"\fServerStream\x120.grpc.webnext.conformance.v1.ServerStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"\x1c\x82\xd3\xe4\x93\x02\x16:\x01*\"\x11/v1/server-stream0\x01\x12u\n" +
 	"\fClientStream\x120.grpc.webnext.conformance.v1.ClientStreamRequest\x1a1.grpc.webnext.conformance.v1.ClientStreamResponse(\x01\x12q\n" +
 	"\n" +
-	"BidiStream\x12..grpc.webnext.conformance.v1.BidiStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload(\x010\x01b\x06proto3"
+	"BidiStream\x12..grpc.webnext.conformance.v1.BidiStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload(\x010\x01\x12\xaf\x01\n" +
+	"\tRestUnary\x12-.grpc.webnext.conformance.v1.RestUnaryRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"B\x82\xd3\xe4\x93\x02<Z\r:\x01*\"\b/v1/restZ\x17:\x01*\"\x12/v1/rest/{payload}\x12\x12/v1/rest/{payload}\x12\x98\x01\n" +
+	"\x10RestServerStream\x12..grpc.webnext.conformance.v1.RestStreamRequest\x1a/.grpc.webnext.conformance.v1.ConformancePayload\"!\x82\xd3\xe4\x93\x02\x1b\x12\x19/v1/rest-stream/{payload}0\x01b\x06proto3"
 
 var (
 	file_conformance_proto_rawDescOnce sync.Once
@@ -778,41 +913,47 @@ func file_conformance_proto_rawDescGZIP() []byte {
 	return file_conformance_proto_rawDescData
 }
 
-var file_conformance_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_conformance_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_conformance_proto_goTypes = []any{
-	(*ResponseDefinition)(nil),       // 0: grpc.webnext.conformance.v1.ResponseDefinition
-	(*StreamMessage)(nil),            // 1: grpc.webnext.conformance.v1.StreamMessage
-	(*UnaryRequest)(nil),             // 2: grpc.webnext.conformance.v1.UnaryRequest
-	(*ServerStreamRequest)(nil),      // 3: grpc.webnext.conformance.v1.ServerStreamRequest
-	(*ClientStreamRequest)(nil),      // 4: grpc.webnext.conformance.v1.ClientStreamRequest
-	(*ClientStreamResponse)(nil),     // 5: grpc.webnext.conformance.v1.ClientStreamResponse
-	(*BidiStreamRequest)(nil),        // 6: grpc.webnext.conformance.v1.BidiStreamRequest
-	(*ConformancePayload)(nil),       // 7: grpc.webnext.conformance.v1.ConformancePayload
-	(*ClientStreamResponseInfo)(nil), // 8: grpc.webnext.conformance.v1.ClientStreamResponseInfo
-	(*RequestInfo)(nil),              // 9: grpc.webnext.conformance.v1.RequestInfo
-	(*Metadatum)(nil),                // 10: grpc.webnext.conformance.v1.Metadatum
+	(*RestUnaryRequest)(nil),         // 0: grpc.webnext.conformance.v1.RestUnaryRequest
+	(*RestStreamRequest)(nil),        // 1: grpc.webnext.conformance.v1.RestStreamRequest
+	(*ResponseDefinition)(nil),       // 2: grpc.webnext.conformance.v1.ResponseDefinition
+	(*StreamMessage)(nil),            // 3: grpc.webnext.conformance.v1.StreamMessage
+	(*UnaryRequest)(nil),             // 4: grpc.webnext.conformance.v1.UnaryRequest
+	(*ServerStreamRequest)(nil),      // 5: grpc.webnext.conformance.v1.ServerStreamRequest
+	(*ClientStreamRequest)(nil),      // 6: grpc.webnext.conformance.v1.ClientStreamRequest
+	(*ClientStreamResponse)(nil),     // 7: grpc.webnext.conformance.v1.ClientStreamResponse
+	(*BidiStreamRequest)(nil),        // 8: grpc.webnext.conformance.v1.BidiStreamRequest
+	(*ConformancePayload)(nil),       // 9: grpc.webnext.conformance.v1.ConformancePayload
+	(*ClientStreamResponseInfo)(nil), // 10: grpc.webnext.conformance.v1.ClientStreamResponseInfo
+	(*RequestInfo)(nil),              // 11: grpc.webnext.conformance.v1.RequestInfo
+	(*Metadatum)(nil),                // 12: grpc.webnext.conformance.v1.Metadatum
 }
 var file_conformance_proto_depIdxs = []int32{
-	10, // 0: grpc.webnext.conformance.v1.ResponseDefinition.headers:type_name -> grpc.webnext.conformance.v1.Metadatum
-	10, // 1: grpc.webnext.conformance.v1.ResponseDefinition.trailers:type_name -> grpc.webnext.conformance.v1.Metadatum
-	1,  // 2: grpc.webnext.conformance.v1.ResponseDefinition.stream_messages:type_name -> grpc.webnext.conformance.v1.StreamMessage
-	0,  // 3: grpc.webnext.conformance.v1.UnaryRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
-	0,  // 4: grpc.webnext.conformance.v1.ServerStreamRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
-	0,  // 5: grpc.webnext.conformance.v1.ClientStreamRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
-	7,  // 6: grpc.webnext.conformance.v1.ClientStreamResponse.payload:type_name -> grpc.webnext.conformance.v1.ConformancePayload
-	0,  // 7: grpc.webnext.conformance.v1.BidiStreamRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
-	9,  // 8: grpc.webnext.conformance.v1.ConformancePayload.request_info:type_name -> grpc.webnext.conformance.v1.RequestInfo
-	10, // 9: grpc.webnext.conformance.v1.RequestInfo.request_headers:type_name -> grpc.webnext.conformance.v1.Metadatum
-	2,  // 10: grpc.webnext.conformance.v1.ConformanceService.Unary:input_type -> grpc.webnext.conformance.v1.UnaryRequest
-	3,  // 11: grpc.webnext.conformance.v1.ConformanceService.ServerStream:input_type -> grpc.webnext.conformance.v1.ServerStreamRequest
-	4,  // 12: grpc.webnext.conformance.v1.ConformanceService.ClientStream:input_type -> grpc.webnext.conformance.v1.ClientStreamRequest
-	6,  // 13: grpc.webnext.conformance.v1.ConformanceService.BidiStream:input_type -> grpc.webnext.conformance.v1.BidiStreamRequest
-	7,  // 14: grpc.webnext.conformance.v1.ConformanceService.Unary:output_type -> grpc.webnext.conformance.v1.ConformancePayload
-	7,  // 15: grpc.webnext.conformance.v1.ConformanceService.ServerStream:output_type -> grpc.webnext.conformance.v1.ConformancePayload
-	5,  // 16: grpc.webnext.conformance.v1.ConformanceService.ClientStream:output_type -> grpc.webnext.conformance.v1.ClientStreamResponse
-	7,  // 17: grpc.webnext.conformance.v1.ConformanceService.BidiStream:output_type -> grpc.webnext.conformance.v1.ConformancePayload
-	14, // [14:18] is the sub-list for method output_type
-	10, // [10:14] is the sub-list for method input_type
+	12, // 0: grpc.webnext.conformance.v1.ResponseDefinition.headers:type_name -> grpc.webnext.conformance.v1.Metadatum
+	12, // 1: grpc.webnext.conformance.v1.ResponseDefinition.trailers:type_name -> grpc.webnext.conformance.v1.Metadatum
+	3,  // 2: grpc.webnext.conformance.v1.ResponseDefinition.stream_messages:type_name -> grpc.webnext.conformance.v1.StreamMessage
+	2,  // 3: grpc.webnext.conformance.v1.UnaryRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
+	2,  // 4: grpc.webnext.conformance.v1.ServerStreamRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
+	2,  // 5: grpc.webnext.conformance.v1.ClientStreamRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
+	9,  // 6: grpc.webnext.conformance.v1.ClientStreamResponse.payload:type_name -> grpc.webnext.conformance.v1.ConformancePayload
+	2,  // 7: grpc.webnext.conformance.v1.BidiStreamRequest.response_definition:type_name -> grpc.webnext.conformance.v1.ResponseDefinition
+	11, // 8: grpc.webnext.conformance.v1.ConformancePayload.request_info:type_name -> grpc.webnext.conformance.v1.RequestInfo
+	12, // 9: grpc.webnext.conformance.v1.RequestInfo.request_headers:type_name -> grpc.webnext.conformance.v1.Metadatum
+	4,  // 10: grpc.webnext.conformance.v1.ConformanceService.Unary:input_type -> grpc.webnext.conformance.v1.UnaryRequest
+	5,  // 11: grpc.webnext.conformance.v1.ConformanceService.ServerStream:input_type -> grpc.webnext.conformance.v1.ServerStreamRequest
+	6,  // 12: grpc.webnext.conformance.v1.ConformanceService.ClientStream:input_type -> grpc.webnext.conformance.v1.ClientStreamRequest
+	8,  // 13: grpc.webnext.conformance.v1.ConformanceService.BidiStream:input_type -> grpc.webnext.conformance.v1.BidiStreamRequest
+	0,  // 14: grpc.webnext.conformance.v1.ConformanceService.RestUnary:input_type -> grpc.webnext.conformance.v1.RestUnaryRequest
+	1,  // 15: grpc.webnext.conformance.v1.ConformanceService.RestServerStream:input_type -> grpc.webnext.conformance.v1.RestStreamRequest
+	9,  // 16: grpc.webnext.conformance.v1.ConformanceService.Unary:output_type -> grpc.webnext.conformance.v1.ConformancePayload
+	9,  // 17: grpc.webnext.conformance.v1.ConformanceService.ServerStream:output_type -> grpc.webnext.conformance.v1.ConformancePayload
+	7,  // 18: grpc.webnext.conformance.v1.ConformanceService.ClientStream:output_type -> grpc.webnext.conformance.v1.ClientStreamResponse
+	9,  // 19: grpc.webnext.conformance.v1.ConformanceService.BidiStream:output_type -> grpc.webnext.conformance.v1.ConformancePayload
+	9,  // 20: grpc.webnext.conformance.v1.ConformanceService.RestUnary:output_type -> grpc.webnext.conformance.v1.ConformancePayload
+	9,  // 21: grpc.webnext.conformance.v1.ConformanceService.RestServerStream:output_type -> grpc.webnext.conformance.v1.ConformancePayload
+	16, // [16:22] is the sub-list for method output_type
+	10, // [10:16] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
 	10, // [10:10] is the sub-list for extension extendee
 	0,  // [0:10] is the sub-list for field type_name
@@ -823,7 +964,7 @@ func file_conformance_proto_init() {
 	if File_conformance_proto != nil {
 		return
 	}
-	file_conformance_proto_msgTypes[10].OneofWrappers = []any{
+	file_conformance_proto_msgTypes[12].OneofWrappers = []any{
 		(*Metadatum_AsciiValue)(nil),
 		(*Metadatum_BinValue)(nil),
 	}
@@ -833,7 +974,7 @@ func file_conformance_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_conformance_proto_rawDesc), len(file_conformance_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

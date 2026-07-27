@@ -8,6 +8,7 @@ native in-process servers per language, plus a schema-agnostic proxy.
 
 ```
 proto/          wire envelope (Frame, Metadatum, …) — shared source of truth
+                + google/api/ — vendored HttpRule subset, the ONE copy everything includes
 spec/           PROTOCOL.md (normative) + COMPATIBILITY.md
 conformance/    language-neutral conformance suite (proto, cases, contract)
 doc/            design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO_SERVER,
@@ -39,7 +40,7 @@ cd rust && cargo clippy --workspace --all-targets   # keep clean
 # lockfile that governs the tree. The e2e/json/promise/h2ts tests spawn the Rust example
 # servers, and the conformance matrix builds and spawns BOTH the Rust and Go conformance
 # servers — so the full suite needs a Rust and a Go toolchain.
-cd node && npm ci && npm test               # 138 tests (client; server is build-only)
+cd node && npm ci && npm test               # 174 tests (client; server is build-only)
 
 # Go. The WS path has a reader, a writer, and a keepalive ticker on one connection,
 # so -race earns its runtime.
@@ -144,14 +145,20 @@ hides.
   (run every server impl × every client driver over the real wire). It runs each case
   against the Rust **and** Go servers; a new impl is one entry in the `SERVERS` table in
   `node/packages/client/test/conformance.test.ts`.
-- **REST (`google.api.http`) is the one surface the matrix does not cover**, so the two
-  routers (`rust/.../httprule.rs`, `go/webnext/httprule.go`) are held together by being
-  *structurally parallel ports* plus a shared fixture: both test suites drive the same
-  `echo.proto` annotations through the same URLs, each Go test naming its Rust
-  counterpart. Change one router, change the other in the same commit. The supported and
-  unsupported surface — and what each unsupported thing actually *does* — is
-  `doc/HTTPRULE_GAPS.md`; every gap there has a test pinning current behavior, so adding
-  support means changing that test.
+- **REST (`google.api.http`) is in the matrix** (`conformance/cases/rest.yaml`), driven by a
+  *raw HTTP* client rather than the grpc-webnext one — the point of an annotated URL is that
+  it needs no SDK. A `rest:` case runs once, not once per profile: the URL fixes the codec
+  and the RPC's cardinality fixes the transport. On top of that, the two routers
+  (`rust/.../httprule.rs`, `go/webnext/httprule.go`) are deliberately *structurally parallel
+  ports* — change one, change the other in the same commit. The supported and unsupported
+  surface — and what each unsupported thing actually *does* — is `doc/HTTPRULE_GAPS.md`;
+  every gap there has a test pinning current behavior, so adding support means changing that
+  test.
+- **A Rust `build.rs` that compiles a proto from outside its own package must declare
+  `cargo:rerun-if-changed` for it.** Cargo's default heuristic only watches the package
+  directory, so without it an edit to `/conformance/proto` or `/proto/google/api` leaves a
+  stale descriptor set compiled in — and the conformance suite then passes against last
+  build's contract, which is worse than failing.
 - A conformance case whose `transports:` lists `websocket` only actually exercises the
   WebSocket if the RPC is a **streaming** one — a unary call takes the Fetch path under
   every transport profile. That blind spot hid a real bug for a while; see

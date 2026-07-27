@@ -35,10 +35,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ConformanceService_Unary_FullMethodName        = "/grpc.webnext.conformance.v1.ConformanceService/Unary"
-	ConformanceService_ServerStream_FullMethodName = "/grpc.webnext.conformance.v1.ConformanceService/ServerStream"
-	ConformanceService_ClientStream_FullMethodName = "/grpc.webnext.conformance.v1.ConformanceService/ClientStream"
-	ConformanceService_BidiStream_FullMethodName   = "/grpc.webnext.conformance.v1.ConformanceService/BidiStream"
+	ConformanceService_Unary_FullMethodName            = "/grpc.webnext.conformance.v1.ConformanceService/Unary"
+	ConformanceService_ServerStream_FullMethodName     = "/grpc.webnext.conformance.v1.ConformanceService/ServerStream"
+	ConformanceService_ClientStream_FullMethodName     = "/grpc.webnext.conformance.v1.ConformanceService/ClientStream"
+	ConformanceService_BidiStream_FullMethodName       = "/grpc.webnext.conformance.v1.ConformanceService/BidiStream"
+	ConformanceService_RestUnary_FullMethodName        = "/grpc.webnext.conformance.v1.ConformanceService/RestUnary"
+	ConformanceService_RestServerStream_FullMethodName = "/grpc.webnext.conformance.v1.ConformanceService/RestServerStream"
 )
 
 // ConformanceServiceClient is the client API for ConformanceService service.
@@ -48,9 +50,16 @@ type ConformanceServiceClient interface {
 	// Unary over Fetch (or a single WebSocket stream). Echoes `payload` unless the
 	// ResponseDefinition says otherwise; used for status, metadata, deadline, and
 	// size-limit cases.
+	//
+	// Also reachable as REST, which needs no extra server code — the annotation
+	// only adds an alias. `body: "*"` means the JSON body IS the UnaryRequest, so
+	// every knob a normal case has still works through the REST surface.
 	Unary(ctx context.Context, in *UnaryRequest, opts ...grpc.CallOption) (*ConformancePayload, error)
 	// Server streaming: emits ResponseDefinition.stream_messages in order, honoring
 	// per-message `delay_ms`, then closes with ResponseDefinition.status.
+	//
+	// Its annotation URL is a *WebSocket* endpoint (a streaming method's REST alias
+	// always is), text-locked single-stream JSON.
 	ServerStream(ctx context.Context, in *ServerStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConformancePayload], error)
 	// Client streaming: consumes the inbound stream, then returns one response built
 	// from the ResponseDefinition on the FIRST request (later requests carry payload
@@ -60,6 +69,17 @@ type ConformanceServiceClient interface {
 	// the ResponseDefinition.status from the first request. Exercises interleaving,
 	// half-close, and mid-stream Reset/cancel.
 	BidiStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BidiStreamRequest, ConformancePayload], error)
+	// Unary, reachable three ways, so one RPC covers every binding shape:
+	//
+	//	GET  /v1/rest/{payload}            — the whole request from the URL
+	//	POST /v1/rest            body:"*"  — the whole request from the body
+	//	POST /v1/rest/{payload}  body:"*"  — both at once, which is the only way to
+	//	                                     assert the precedence rules
+	RestUnary(ctx context.Context, in *RestUnaryRequest, opts ...grpc.CallOption) (*ConformancePayload, error)
+	// Server streaming with **no body at all**: the request comes entirely from the
+	// path and query, and the server injects it on the client's behalf. This is the
+	// GET-style annotated stream, the trickiest REST shape on the WebSocket surface.
+	RestServerStream(ctx context.Context, in *RestStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConformancePayload], error)
 }
 
 type conformanceServiceClient struct {
@@ -125,6 +145,35 @@ func (c *conformanceServiceClient) BidiStream(ctx context.Context, opts ...grpc.
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ConformanceService_BidiStreamClient = grpc.BidiStreamingClient[BidiStreamRequest, ConformancePayload]
 
+func (c *conformanceServiceClient) RestUnary(ctx context.Context, in *RestUnaryRequest, opts ...grpc.CallOption) (*ConformancePayload, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConformancePayload)
+	err := c.cc.Invoke(ctx, ConformanceService_RestUnary_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *conformanceServiceClient) RestServerStream(ctx context.Context, in *RestStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConformancePayload], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ConformanceService_ServiceDesc.Streams[3], ConformanceService_RestServerStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RestStreamRequest, ConformancePayload]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ConformanceService_RestServerStreamClient = grpc.ServerStreamingClient[ConformancePayload]
+
 // ConformanceServiceServer is the server API for ConformanceService service.
 // All implementations must embed UnimplementedConformanceServiceServer
 // for forward compatibility.
@@ -132,9 +181,16 @@ type ConformanceServiceServer interface {
 	// Unary over Fetch (or a single WebSocket stream). Echoes `payload` unless the
 	// ResponseDefinition says otherwise; used for status, metadata, deadline, and
 	// size-limit cases.
+	//
+	// Also reachable as REST, which needs no extra server code — the annotation
+	// only adds an alias. `body: "*"` means the JSON body IS the UnaryRequest, so
+	// every knob a normal case has still works through the REST surface.
 	Unary(context.Context, *UnaryRequest) (*ConformancePayload, error)
 	// Server streaming: emits ResponseDefinition.stream_messages in order, honoring
 	// per-message `delay_ms`, then closes with ResponseDefinition.status.
+	//
+	// Its annotation URL is a *WebSocket* endpoint (a streaming method's REST alias
+	// always is), text-locked single-stream JSON.
 	ServerStream(*ServerStreamRequest, grpc.ServerStreamingServer[ConformancePayload]) error
 	// Client streaming: consumes the inbound stream, then returns one response built
 	// from the ResponseDefinition on the FIRST request (later requests carry payload
@@ -144,6 +200,17 @@ type ConformanceServiceServer interface {
 	// the ResponseDefinition.status from the first request. Exercises interleaving,
 	// half-close, and mid-stream Reset/cancel.
 	BidiStream(grpc.BidiStreamingServer[BidiStreamRequest, ConformancePayload]) error
+	// Unary, reachable three ways, so one RPC covers every binding shape:
+	//
+	//	GET  /v1/rest/{payload}            — the whole request from the URL
+	//	POST /v1/rest            body:"*"  — the whole request from the body
+	//	POST /v1/rest/{payload}  body:"*"  — both at once, which is the only way to
+	//	                                     assert the precedence rules
+	RestUnary(context.Context, *RestUnaryRequest) (*ConformancePayload, error)
+	// Server streaming with **no body at all**: the request comes entirely from the
+	// path and query, and the server injects it on the client's behalf. This is the
+	// GET-style annotated stream, the trickiest REST shape on the WebSocket surface.
+	RestServerStream(*RestStreamRequest, grpc.ServerStreamingServer[ConformancePayload]) error
 	mustEmbedUnimplementedConformanceServiceServer()
 }
 
@@ -165,6 +232,12 @@ func (UnimplementedConformanceServiceServer) ClientStream(grpc.ClientStreamingSe
 }
 func (UnimplementedConformanceServiceServer) BidiStream(grpc.BidiStreamingServer[BidiStreamRequest, ConformancePayload]) error {
 	return status.Error(codes.Unimplemented, "method BidiStream not implemented")
+}
+func (UnimplementedConformanceServiceServer) RestUnary(context.Context, *RestUnaryRequest) (*ConformancePayload, error) {
+	return nil, status.Error(codes.Unimplemented, "method RestUnary not implemented")
+}
+func (UnimplementedConformanceServiceServer) RestServerStream(*RestStreamRequest, grpc.ServerStreamingServer[ConformancePayload]) error {
+	return status.Error(codes.Unimplemented, "method RestServerStream not implemented")
 }
 func (UnimplementedConformanceServiceServer) mustEmbedUnimplementedConformanceServiceServer() {}
 func (UnimplementedConformanceServiceServer) testEmbeddedByValue()                            {}
@@ -230,6 +303,35 @@ func _ConformanceService_BidiStream_Handler(srv interface{}, stream grpc.ServerS
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ConformanceService_BidiStreamServer = grpc.BidiStreamingServer[BidiStreamRequest, ConformancePayload]
 
+func _ConformanceService_RestUnary_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestUnaryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConformanceServiceServer).RestUnary(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConformanceService_RestUnary_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConformanceServiceServer).RestUnary(ctx, req.(*RestUnaryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ConformanceService_RestServerStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(RestStreamRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ConformanceServiceServer).RestServerStream(m, &grpc.GenericServerStream[RestStreamRequest, ConformancePayload]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ConformanceService_RestServerStreamServer = grpc.ServerStreamingServer[ConformancePayload]
+
 // ConformanceService_ServiceDesc is the grpc.ServiceDesc for ConformanceService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -240,6 +342,10 @@ var ConformanceService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Unary",
 			Handler:    _ConformanceService_Unary_Handler,
+		},
+		{
+			MethodName: "RestUnary",
+			Handler:    _ConformanceService_RestUnary_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
@@ -258,6 +364,11 @@ var ConformanceService_ServiceDesc = grpc.ServiceDesc{
 			Handler:       _ConformanceService_BidiStream_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "RestServerStream",
+			Handler:       _ConformanceService_RestServerStream_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "conformance.proto",

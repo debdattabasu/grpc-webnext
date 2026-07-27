@@ -45,7 +45,8 @@
     "LICENSE-APACHE"
   ],
   "scripts": {
-    "gen": "protoc --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./src/generated --ts_proto_opt=esModuleInterop=true,forceLong=long,outputServices=generic-definitions,useExactTypes=false -I ../../../proto ../../../proto/grpc_webnext.proto",
+    "gen": "protoc --plugin=protoc-gen-ts_proto=../../node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./src/generated --ts_proto_opt=esModuleInterop=true,forceLong=long,outputServices=generic-definitions,useExactTypes=false -I ../../../proto ../../../proto/grpc_webnext.proto",
+    "gen:test": "protoc --plugin=protoc-gen-ts_proto=../../node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./test/gen --ts_proto_opt=esModuleInterop=true,forceLong=long,outputServices=generic-definitions,useExactTypes=false,emitImportedFiles=false -I ../../../conformance/proto -I ../../../rust/crates/testecho/proto -I ../../../proto ../../../conformance/proto/conformance.proto ../../../rust/crates/testecho/proto/echo.proto",
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "npm run build",
     "test": "vitest run",

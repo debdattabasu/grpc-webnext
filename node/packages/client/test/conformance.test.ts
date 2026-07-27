@@ -17,8 +17,11 @@ import { load } from "js-yaml";
 import WebSocket from "ws";
 import { makeClient, Metadata, Status, type ClientOptions } from "../src/index.js";
 import {
+  // Imported as a *value*, not just a type: the REST driver decodes bare JSON
+  // response bodies with `ConformancePayload.fromJSON`, since a REST call carries
+  // no protobuf framing for the client to unwrap.
+  ConformancePayload,
   ConformanceServiceDefinition,
-  type ConformancePayload,
   type Metadatum,
   type ResponseDefinition,
 } from "./gen/conformance.js";
@@ -49,9 +52,11 @@ type Matcher = {
   payload?: Bytes;
   request_info?: { request_headers_contain?: Meta[]; timeout_present?: boolean; json?: boolean };
 };
+type Rest = { verb: string; path: string; body?: string; content_type?: string };
 type Case = {
   name: string;
   rpc: "Unary" | "ServerStream" | "ClientStream" | "BidiStream";
+  rest?: Rest;
   codecs?: ("proto" | "json")[];
   timeout_millis?: number;
   request_metadata?: Meta[];
@@ -60,7 +65,8 @@ type Case = {
   requests?: Msg[];
   cancel_after_messages?: number;
   expect: {
-    status: { code?: number; message_contains?: string; not_ok?: boolean };
+    status?: { code?: number; message_contains?: string; not_ok?: boolean };
+    http_status?: number;
     response?: Matcher;
     messages?: Matcher[];
     message_count?: number;
@@ -116,6 +122,10 @@ function toRD(rd?: RD): ResponseDefinition {
 // --- transport profiles + server config profiles ----------------------------------------
 type Profile = { name: string; config: Partial<ClientOptions> };
 function profilesFor(c: Case): Profile[] {
+  // A REST case names its own URL, which fixes both the codec (JSON, always) and
+  // the transport (the spec's rule: a unary annotation URL is Fetch, a streaming
+  // one is a WebSocket). Nothing left to permute — it runs once.
+  if (c.rest) return [{ name: "rest", config: {} }];
   const codecs = c.codecs ?? ["proto", "json"];
   const out: Profile[] = [];
   if (codecs.includes("proto")) {
@@ -145,6 +155,8 @@ interface Result {
   messages: ConformancePayload[];
   response?: ConformancePayload;
   status: StatusResult;
+  /** REST only: the raw HTTP status, for surface rejections that never become an RPC. */
+  httpStatus?: number;
 }
 type Client = ReturnType<typeof makeClient<typeof ConformanceServiceDefinition>>;
 
@@ -245,6 +257,114 @@ function runCase(client: Client, c: Case): Promise<Result> {
   }
 }
 
+// --- driving a REST (google.api.http) call --------------------------------------------------
+//
+// These deliberately do NOT go through the client: the whole point of a REST alias is that a
+// caller who knows nothing about grpc-webnext can use it with an ordinary HTTP request, so the
+// driver issues one. `fetch` for a unary method's URL, a raw WebSocket for a streaming one —
+// which is the spec's rule, not a choice this driver makes.
+
+/**
+ * A unary annotation URL over Fetch. The JSON surface carries the gRPC status in
+ * `grpc-status`/`grpc-message` headers and the message as a bare JSON body, so the whole
+ * response is one HTTP round trip with no framing to decode.
+ */
+async function runRestFetch(baseUrl: string, c: Case): Promise<Result> {
+  const rest = c.rest!;
+  const headers: Record<string, string> = {};
+  if (rest.body !== undefined) headers["content-type"] = rest.content_type ?? "application/json";
+  else if (rest.content_type) headers["content-type"] = rest.content_type;
+  for (const m of c.request_metadata ?? []) {
+    // `-bin` metadata is base64 on the HTTP wire; the driver spells it the same way.
+    headers[m.key] = m.b64 !== undefined ? m.b64 : (m.ascii ?? "");
+  }
+
+  const resp = await fetch(baseUrl + rest.path, { method: rest.verb, headers, body: rest.body });
+  const text = await resp.text();
+
+  // Initial and trailing metadata both land in headers on the JSON surface, so the same
+  // Metadata satisfies `headers_contain` and `trailers_contain`.
+  const md = new Metadata();
+  resp.headers.forEach((value, key) => {
+    if (!key.startsWith("grpc-") && key !== "content-type" && key !== "content-length") md.set(key, value);
+  });
+
+  const code = Number(resp.headers.get("grpc-status") ?? Status.UNKNOWN);
+  const status: StatusResult = {
+    code,
+    details: decodeURIComponent(resp.headers.get("grpc-message") ?? ""),
+    metadata: md,
+  };
+  const response =
+    resp.ok && code === Status.OK && text.length > 0 ? ConformancePayload.fromJSON(JSON.parse(text)) : undefined;
+  return { headers: md, messages: [], response, status, httpStatus: resp.status };
+}
+
+/**
+ * A streaming annotation URL over WebSocket: text-locked single-stream JSON. A body-less
+ * (GET-style) binding still needs one frame to open the stream — `{}` — after which the server
+ * injects the request built from the URL and half-closes on the client's behalf.
+ */
+function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
+  const rest = c.rest!;
+  const url = "ws" + baseUrl.slice("http".length) + rest.path;
+  // Blank by default, which is how a browser reaches an annotated route; a case can offer a
+  // wrong-surface subprotocol instead to exercise rejection.
+  const protocols = rest.content_type ? [rest.content_type] : [];
+  const ws = new wsImpl(url, protocols);
+
+  return new Promise((resolve) => {
+    let headers = new Metadata();
+    const messages: ConformancePayload[] = [];
+    let status: StatusResult | undefined;
+
+    ws.onopen = () => {
+      const open: Record<string, unknown> = {};
+      const md = Object.fromEntries((c.request_metadata ?? []).map((m) => [m.key, m.ascii ?? ""]));
+      if (Object.keys(md).length) open.metadata = md;
+      if (rest.body !== undefined) open.message = JSON.parse(rest.body);
+      ws.send(JSON.stringify(open));
+      // A REST case carries exactly one request message, so the send side is done.
+      // On a body-less binding the server has already half-closed on our behalf and
+      // this is a no-op; on a `body: "*"` binding it is what lets the RPC start.
+      ws.send(JSON.stringify({ halfClose: true }));
+    };
+    ws.onmessage = (ev) => {
+      const frame = JSON.parse(String(ev.data)) as {
+        metadata?: Record<string, string>;
+        message?: unknown;
+        status?: { code?: number; message?: string };
+      };
+      if (frame.status) {
+        status = {
+          code: frame.status.code ?? Status.OK,
+          details: frame.status.message ?? "",
+          metadata: toMetadata(Object.entries(frame.metadata ?? {}).map(([key, ascii]) => ({ key, ascii }))),
+        };
+      } else if (frame.message !== undefined) {
+        messages.push(ConformancePayload.fromJSON(frame.message));
+      } else {
+        headers = toMetadata(Object.entries(frame.metadata ?? {}).map(([key, ascii]) => ({ key, ascii })));
+      }
+    };
+    ws.onclose = (ev) => {
+      // A pre-RPC rejection arrives only as a close code — the `4000 + gRPC code` convention —
+      // so it becomes the status when no terminal frame did.
+      if (!status) {
+        const code = ev.code >= 4000 && ev.code <= 4016 ? ev.code - 4000 : Status.UNAVAILABLE;
+        status = { code, details: ev.reason ?? "", metadata: new Metadata() };
+      }
+      resolve({ headers, messages, status });
+    };
+    ws.onerror = () => {
+      if (!status) status = { code: Status.UNAVAILABLE, details: "websocket error", metadata: new Metadata() };
+    };
+  });
+}
+
+const runRestCase = (baseUrl: string, c: Case): Promise<Result> =>
+  c.rpc === "Unary" || c.rpc === "ClientStream" ? runRestFetch(baseUrl, c) : runRestWebSocket(baseUrl, c);
+
 // --- assertions --------------------------------------------------------------------------
 const bytesEq = (a: Uint8Array | undefined, b: Uint8Array) =>
   expect(Array.from(a ?? new Uint8Array())).toEqual(Array.from(b));
@@ -282,14 +402,22 @@ function assertPayload(matcher: Matcher, cp: ConformancePayload | undefined) {
 }
 
 function assertCase(c: Case, r: Result) {
-  if (c.expect.status.not_ok) {
+  // A surface rejection never becomes an RPC, so it is asserted as a raw HTTP status
+  // (REST/Fetch only — a WebSocket rejection arrives as a `4000 + code` close, which the
+  // driver has already turned back into an ordinary gRPC status).
+  if (c.expect.http_status !== undefined) {
+    expect(r.httpStatus, "HTTP status").toBe(c.expect.http_status);
+    return;
+  }
+  const want = c.expect.status!;
+  if (want.not_ok) {
     // The exact code is transport-dependent (a mid-upload rejection may surface as a stream
     // failure rather than a clean RESOURCE_EXHAUSTED) — assert only that it was rejected.
     expect(r.status.code, `expected non-OK (details: "${r.status.details}")`).not.toBe(Status.OK);
   } else {
-    expect(r.status.code, `status (details: "${r.status.details}")`).toBe(c.expect.status.code);
+    expect(r.status.code, `status (details: "${r.status.details}")`).toBe(want.code);
   }
-  if (c.expect.status.message_contains) expect(r.status.details).toContain(c.expect.status.message_contains);
+  if (want.message_contains) expect(r.status.details).toContain(want.message_contains);
   if (c.expect.response) assertPayload(c.expect.response, r.response);
   if (c.expect.messages) {
     expect(r.messages.length).toBeGreaterThanOrEqual(c.expect.messages.length);
@@ -386,6 +514,12 @@ for (const impl of SERVERS) {
         for (const profile of profilesFor(c)) {
           it(`${c.name} [${profile.name}]`, async () => {
             const server = servers.get(serverKey(impl.name, c.requires))!;
+            // REST cases bypass the client entirely — an annotated URL is meant to be
+            // reachable by an ordinary HTTP caller, so the driver is one.
+            if (c.rest) {
+              assertCase(c, await runRestCase(server.baseUrl, c));
+              return;
+            }
             const client = makeClient(ConformanceServiceDefinition, {
               baseUrl: server.baseUrl,
               webSocketImpl: wsImpl,

@@ -15,27 +15,23 @@ import (
 	"strings"
 	"time"
 
+	pb "github.com/grpc-webnext/grpc-webnext/go/internal/conformance/conformancepb"
+	"github.com/grpc-webnext/grpc-webnext/go/internal/protoset"
+	"github.com/grpc-webnext/grpc-webnext/go/webnext"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protodesc"
-	"google.golang.org/protobuf/types/descriptorpb"
-
-	pb "github.com/grpc-webnext/grpc-webnext/go/internal/conformance/conformancepb"
-	"github.com/grpc-webnext/grpc-webnext/go/webnext"
 )
 
 // Register installs the conformance service on a gRPC server.
 func Register(s grpc.ServiceRegistrar) { pb.RegisterConformanceServiceServer(s, conformanceServer{}) }
 
-// DescriptorSet is the encoded FileDescriptorSet the `+json` transcoder needs,
-// built straight from the descriptors compiled into the generated package — so
-// there is no side-car .bin to keep in sync with the proto.
+// DescriptorSet is the encoded FileDescriptorSet the `+json` transcoder and the
+// REST router need, built straight from the descriptors compiled into the
+// generated package — so there is no side-car .bin to keep in sync with the proto.
 func DescriptorSet() ([]byte, error) {
-	fdp := protodesc.ToFileDescriptorProto(pb.File_conformance_proto)
-	return proto.Marshal(&descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{fdp}})
+	return protoset.Marshal(pb.File_conformance_proto)
 }
 
 // --- metadata / request-info mapping ----------------------------------------
@@ -48,7 +44,11 @@ func DescriptorSet() ([]byte, error) {
 func toConformanceMetadata(md metadata.MD) []*pb.Metadatum {
 	var out []*pb.Metadatum
 	for key, values := range md {
-		if webnext.IsDeniedHeader(key) {
+		// HTTP/2 pseudo-headers are transport framing, not user metadata. grpc-go
+		// surfaces `:authority` to the service; tonic does not, so dropping it here
+		// makes `request_headers` mean the same thing on both implementations —
+		// which matters, because conformance cases assert on it.
+		if strings.HasPrefix(key, ":") || webnext.IsDeniedHeader(key) {
 			continue
 		}
 		for _, v := range values {
@@ -250,6 +250,37 @@ func (conformanceServer) BidiStream(stream pb.ConformanceService_BidiStreamServe
 	if rd.GetStatusCode() != 0 {
 		stream.SetTrailer(fromConformanceMetadata(rd.GetTrailers()))
 		return statusFrom(rd)
+	}
+	return nil
+}
+
+// --- REST / google.api.http URL binding -------------------------------------
+//
+// Deliberately trivial: these exist to prove the *routing* — that a URL built a
+// correct request message — so any logic here would only get in the way of
+// reading the assertion.
+
+func (conformanceServer) RestUnary(ctx context.Context, req *pb.RestUnaryRequest) (*pb.ConformancePayload, error) {
+	info := requestInfo(ctx)
+	if code := req.GetStatusCode(); code != 0 {
+		return nil, status.Error(codes.Code(code), req.GetStatusMessage())
+	}
+	return &pb.ConformancePayload{Payload: []byte(req.GetPayload()), RequestInfo: info}, nil
+}
+
+func (conformanceServer) RestServerStream(req *pb.RestStreamRequest, stream grpc.ServerStreamingServer[pb.ConformancePayload]) error {
+	info := requestInfo(stream.Context())
+	for i := uint32(0); i < req.GetCount(); i++ {
+		payload := &pb.ConformancePayload{Payload: []byte(req.GetPayload())}
+		if i == 0 {
+			payload.RequestInfo = info
+		}
+		if err := stream.Send(payload); err != nil {
+			return err
+		}
+	}
+	if code := req.GetStatusCode(); code != 0 {
+		return status.Error(codes.Code(code), "")
 	}
 	return nil
 }

@@ -37,7 +37,7 @@ protoc \
 # --- the conformance service (messages + grpc-go service stubs) -------------
 rm -f internal/conformance/conformancepb/*.pb.go
 protoc \
-  -I "$root/conformance/proto" \
+  -I "$root/conformance/proto" -I "$root/proto" \
   --go_out=. --go_opt=module="$mod" \
   --go_opt=Mconformance.proto="$mod/internal/conformance/conformancepb" \
   --go-grpc_out=. --go-grpc_opt=module="$mod" \
@@ -48,12 +48,12 @@ protoc \
 #
 # The SAME proto the Rust crate's REST tests use, so both implementations are
 # held to one set of annotations rather than each inventing its own. Its
-# `google/api` imports are the vendored subset next to it; only echo.proto is
+# `google/api` imports resolve from the shared proto root; only echo.proto is
 # passed to protoc, so the annotations bindings come from genproto (their
 # `go_package` already points there) rather than being regenerated here.
 rm -f internal/testecho/testechopb/*.pb.go
 protoc \
-  -I "$root/rust/crates/testecho/proto" \
+  -I "$root/rust/crates/testecho/proto" -I "$root/proto" \
   --go_out=. --go_opt=module="$mod" \
   --go_opt=Mecho.proto="$mod/internal/testecho/testechopb" \
   --go-grpc_out=. --go-grpc_opt=module="$mod" \

@@ -30,7 +30,8 @@ const FILE_DESCRIPTOR_SET: &[u8] =
 use pb::conformance_service_server::{ConformanceService, ConformanceServiceServer};
 use pb::{
     metadatum, BidiStreamRequest, ClientStreamRequest, ClientStreamResponse, ConformancePayload,
-    Metadatum, RequestInfo, ResponseDefinition, ServerStreamRequest, UnaryRequest,
+    Metadatum, RequestInfo, ResponseDefinition, RestStreamRequest, RestUnaryRequest,
+    ServerStreamRequest, UnaryRequest,
 };
 
 // --- Metadata / request-info mapping ---------------------------------------
@@ -286,6 +287,48 @@ impl ConformanceService for ConformanceSvc {
         };
 
         Ok(Response::new(Box::pin(output) as Self::BidiStreamStream))
+    }
+
+    // --- REST / google.api.http URL binding ---------------------------------
+    //
+    // Deliberately trivial: these exist to prove the *routing* — that a URL built
+    // a correct request message — so any logic here would only get in the way of
+    // reading the assertion.
+
+    async fn rest_unary(
+        &self,
+        request: Request<RestUnaryRequest>,
+    ) -> Result<Response<ConformancePayload>, Status> {
+        let request_info = request_info_from(request.metadata());
+        let req = request.into_inner();
+        if req.status_code != 0 {
+            return Err(Status::new(Code::from(req.status_code as i32), req.status_message));
+        }
+        Ok(Response::new(ConformancePayload {
+            payload: req.payload.into_bytes(),
+            request_info: Some(request_info),
+        }))
+    }
+
+    type RestServerStreamStream = PayloadStream;
+
+    async fn rest_server_stream(
+        &self,
+        request: Request<RestStreamRequest>,
+    ) -> Result<Response<Self::RestServerStreamStream>, Status> {
+        let request_info = request_info_from(request.metadata());
+        let req = request.into_inner();
+
+        let output = async_stream::try_stream! {
+            for i in 0..req.count {
+                let request_info = (i == 0).then(|| request_info.clone());
+                yield ConformancePayload { payload: req.payload.clone().into_bytes(), request_info };
+            }
+            if req.status_code != 0 {
+                Err::<(), Status>(Status::new(Code::from(req.status_code as i32), ""))?;
+            }
+        };
+        Ok(Response::new(Box::pin(output) as Self::RestServerStreamStream))
     }
 }
 

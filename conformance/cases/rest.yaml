@@ -1,0 +1,268 @@
+# REST transcoding of `google.api.http` annotations.
+#
+# These cases are driven by a RAW HTTP client, not the grpc-webnext client — that
+# is the whole claim being tested. An annotated URL is supposed to be reachable by
+# anything that can speak JSON over HTTP, so the driver speaks JSON over HTTP:
+# `fetch` for a unary method's URL, a bare WebSocket for a streaming one (the
+# spec's rule, since a WS upgrade is always a GET).
+#
+# Consequently a REST case runs exactly ONCE — no transport/codec matrix. The URL
+# fixes both: annotated endpoints are JSON-only, and the RPC's cardinality picks
+# the surface. What the matrix still gives is the part that matters here: every
+# case below runs against EVERY server implementation.
+suite: rest
+
+cases:
+  # --- body binding: `body: "*"`, on an RPC that also has a main path ----------
+
+  # The annotation is only an alias, so the ordinary UnaryRequest — payload plus a
+  # full ResponseDefinition — still drives the call. Nothing about the service had
+  # to change to serve this URL.
+  - name: unary-body-wildcard
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/unary
+      body: '{"payload":"aGVsbG8=","responseDefinition":{"payload":"aGVsbG8="}}'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "hello" }
+
+  # A non-OK status must cross the REST surface as a gRPC status in the headers —
+  # HTTP 200 with `grpc-status`, never an HTTP error code. Trailing metadata rides
+  # along, since the JSON surface has only one header block.
+  - name: unary-error-with-trailers
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/unary
+      body: >-
+        {"payload":"eA==","responseDefinition":{"statusCode":9,"statusMessage":"nope",
+        "trailers":[{"key":"x-detail","asciiValue":"denied"}]}}
+    expect:
+      status: { code: 9, message_contains: "nope" }
+      trailers_contain:
+        - { key: "x-detail", ascii: "denied" }
+
+  # Initial metadata must reach the caller as ordinary response headers.
+  - name: unary-response-headers
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/unary
+      body: >-
+        {"payload":"eA==","responseDefinition":{"payload":"eA==",
+        "headers":[{"key":"x-greeting","asciiValue":"hi"}]}}
+    expect:
+      status: { code: 0 }
+      headers_contain:
+        - { key: "x-greeting", ascii: "hi" }
+
+  # Request headers are request metadata: they must reach the service like any
+  # other transport's metadata, which is what makes REST a first-class surface
+  # rather than a lossy shortcut.
+  - name: unary-request-metadata
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/unary
+      body: '{"payload":"eA==","responseDefinition":{"payload":"eA=="}}'
+    request_metadata:
+      - { key: "x-token", ascii: "abc123" }
+    expect:
+      status: { code: 0 }
+      response:
+        request_info:
+          request_headers_contain:
+            - { key: "x-token", ascii: "abc123" }
+
+  # `application/grpc-webnext+json` is JSON too, so the SDK content-type reaches an
+  # annotated URL as well as plain `application/json`.
+  - name: unary-sdk-json-content-type
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/unary
+      content_type: application/grpc-webnext+json
+      body: '{"payload":"aGk=","responseDefinition":{"payload":"aGk="}}'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "hi" }
+
+  # Binary framing does not fit a REST URL, so `+proto` there is the wrong surface
+  # and must be refused explicitly — 415, not a 404 and not a silent main-path call.
+  - name: unary-proto-content-type-rejected
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/unary
+      content_type: application/grpc-webnext+proto
+      body: ""
+    expect:
+      http_status: 415
+
+  # --- URL binding: path segments and query params -----------------------------
+
+  # `GET /v1/rest/{payload}` builds the entire request from the path. No body at
+  # all — the case that most distinguishes REST from "JSON over a POST".
+  - name: url-path-binding
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest/hello
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "hello" }
+
+  # A path segment is percent-decoded before it binds.
+  - name: url-path-percent-decoded
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest/hello%20world
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "hello world" }
+
+  # Query params bind the fields the path doesn't, coerced to the field's type —
+  # here a uint32 status code, which drives the error path from a URL alone.
+  - name: url-query-binding-error
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest/x?status_code=7&status_message=denied
+    expect:
+      status: { code: 7, message_contains: "denied" }
+
+  # `additional_bindings`: the same RPC reached by its second binding, a POST with
+  # a wildcard body. One handler, two routes, identical result.
+  - name: url-additional-binding
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/rest
+      body: '{"payload":"viaPost"}'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "viaPost" }
+
+  # Both precedence rules at once, on the binding that has a path variable AND a
+  # wildcard body (spec/PROTOCOL.md "REST binding precedence"):
+  #
+  #   * the path variable OVERLAYS the body      -> payload is "frompath", not "frombody"
+  #   * query params are IGNORED under body: "*" -> status_code=7 does NOT apply, so OK
+  #
+  # Either rule breaking fails this case, and fails it distinguishably: a wrong
+  # payload for the first, a non-zero status for the second.
+  - name: url-precedence-path-over-body-query-ignored
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/rest/frompath?status_code=7&payload=fromquery
+      body: '{"payload":"frombody"}'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "frompath" }
+
+  # --- streaming: an annotated URL is a WebSocket ------------------------------
+
+  # A streaming method's annotation URL is a WebSocket endpoint. This binding is
+  # body-less, so the server must build the one request from the URL and half-close
+  # on the client's behalf — the trickiest REST shape there is.
+  - name: stream-url-binding
+    rpc: ServerStream
+    rest:
+      verb: GET
+      path: /v1/rest-stream/tick?count=3
+    expect:
+      status: { code: 0 }
+      message_count: 3
+      messages:
+        - payload: { text: "tick" }
+        - payload: { text: "tick" }
+        - payload: { text: "tick" }
+
+  # Zero messages then a clean close: the empty stream must still terminate with a
+  # status frame rather than just dropping the socket.
+  - name: stream-url-binding-empty
+    rpc: ServerStream
+    rest:
+      verb: GET
+      path: /v1/rest-stream/x?count=0
+    expect:
+      status: { code: 0 }
+      message_count: 0
+
+  # A terminal error after some messages, over the REST WebSocket surface.
+  - name: stream-error-after-messages
+    rpc: ServerStream
+    rest:
+      verb: GET
+      path: /v1/rest-stream/x?count=2&status_code=9
+    expect:
+      status: { code: 9 }
+      message_count: 2
+
+  # The `body: "*"` streaming route: each frame's JSON is a request message, so the
+  # opening frame carries a full ServerStreamRequest and the ResponseDefinition
+  # drives the stream exactly as it does on the main surface.
+  - name: stream-body-wildcard
+    rpc: ServerStream
+    rest:
+      verb: POST
+      path: /v1/server-stream
+      body: >-
+        {"responseDefinition":{"streamMessages":[{"payload":"YQ=="},{"payload":"Yg=="}]}}
+    expect:
+      status: { code: 0 }
+      message_count: 2
+      messages:
+        - payload: { text: "a" }
+        - payload: { text: "b" }
+
+  # Initial metadata on the WebSocket surface arrives as the Header frame.
+  - name: stream-response-headers
+    rpc: ServerStream
+    rest:
+      verb: POST
+      path: /v1/server-stream
+      body: >-
+        {"responseDefinition":{"streamMessages":[{"payload":"YQ=="}],
+        "headers":[{"key":"x-greeting","asciiValue":"hi"}]}}
+    expect:
+      status: { code: 0 }
+      message_count: 1
+      headers_contain:
+        - { key: "x-greeting", ascii: "hi" }
+
+  # `grpc-webnext+json` is accepted on a REST WebSocket route, like a blank
+  # subprotocol or `application/json`.
+  - name: stream-sdk-json-subprotocol
+    rpc: ServerStream
+    rest:
+      verb: GET
+      path: /v1/rest-stream/hi?count=1
+      content_type: grpc-webnext+json
+    expect:
+      status: { code: 0 }
+      message_count: 1
+      messages:
+        - payload: { text: "hi" }
+
+  # A REST WebSocket route is text-locked JSON, so a binary subprotocol is the
+  # wrong surface. The rejection is a `4000 + code` close — 4009,
+  # FAILED_PRECONDITION — which is how a browser reads a pre-RPC refusal.
+  - name: stream-proto-subprotocol-rejected
+    rpc: ServerStream
+    rest:
+      verb: GET
+      path: /v1/rest-stream/hi?count=1
+      content_type: grpc-webnext+proto
+    expect:
+      status: { code: 9 }
