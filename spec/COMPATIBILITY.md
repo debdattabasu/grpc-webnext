@@ -69,7 +69,7 @@ This is **not** HTTP/2-style framing. The rules are deliberately minimal:
   `Frame` path opens a fresh WebSocket per stream, which under HTTP/1.1 is subject to the
   browser's ~6-connections/host cap. That cap is exactly why the **binary default runs real
   HTTP/2 over h2ts** — one WebSocket, many streams, multiplexed natively (see
-  [doc/H2TS_INTEGRATION.md](../doc/H2TS_INTEGRATION.md)). Over HTTP/2 the browser also
+  [PROTOCOL_H2TS.md](PROTOCOL_H2TS.md)). Over HTTP/2 the browser also
   multiplexes WebSockets for free (RFC 8441 extended CONNECT), though Safari does so only
   when it can reuse an already-open h2 connection.
 

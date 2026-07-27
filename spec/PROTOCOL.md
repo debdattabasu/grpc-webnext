@@ -8,13 +8,13 @@ subprotocol (WebSocket) then disambiguate the paths on the wire.
 
 - **`proto` (binary) defaults to `{ unary: "h2ts", streaming: "h2ts" }`:** *real* gRPC over
   [h2ts](https://github.com/debdattabasu/h2ts) — real HTTP/2 tunneled over a WebSocket. The
-  browser makes actual `application/grpc` calls and the server is **unmodified tonic** behind
-  an h2ts gateway; there is no grpc-webnext translation on this path, and H2 supplies real
-  framing, trailers, flow control, and many concurrent streams per connection. **This path
-  is out of scope for this document** — see
-  [`doc/H2TS_INTEGRATION.md`](../doc/H2TS_INTEGRATION.md) and the
-  gRPC-over-HTTP/2 spec. Binary opts out per axis: `unary: "fetch"` uses the translated Fetch
-  path, and `streaming: "ws"` uses the custom `Frame` protocol below.
+  browser makes actual `application/grpc` calls and the server is an **unmodified gRPC
+  server** behind an h2ts gateway; there is no grpc-webnext translation on this path, and H2
+  supplies real framing, trailers, flow control, and many concurrent streams per connection.
+  **That path is specified by [`PROTOCOL_H2TS.md`](PROTOCOL_H2TS.md)**, its sibling document,
+  which is short by design — it delegates to the WebSocket, HTTP/2, and gRPC-over-HTTP/2
+  specs and pins only the seams grpc-webnext owns. Binary opts out per axis: `unary: "fetch"`
+  uses the translated Fetch path, and `streaming: "ws"` uses the custom `Frame` protocol below.
 - **`json` is locked to `{ unary: "fetch", streaming: "ws" }`:** always the custom protocol,
   never h2ts, so it stays plaintext and inspectable in browser devtools.
 
@@ -46,7 +46,7 @@ rules**:
 | *(blank / no codec subprotocol)* | flag off → **415 / close 4012** · on → ✅ | ✅ JSON |
 
 A WebSocket upgrade offering the **`h2ts`** subprotocol is the binary default — real gRPC
-over an h2ts tunnel, out of scope here (see the split section above).
+over an h2ts tunnel, specified in [`PROTOCOL_H2TS.md`](PROTOCOL_H2TS.md) rather than here.
 
 `allow_implicit_codec` is off by default; its whole job is rule 1's flag — *"may plain
 HTTP reach the real gRPC method paths, or only the REST routes?"* Rejections are

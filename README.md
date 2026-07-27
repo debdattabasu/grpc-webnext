@@ -102,8 +102,11 @@ Transport is a per-client config `{ codec, unary, streaming }`:
 | **REST** (server-annotated) | any HTTP verb | — | Plain JSON on `/v1/…` URLs — grpc-gateway-style |
 
 The wire format is defined once, in [`proto/grpc_webnext.proto`](proto/grpc_webnext.proto) and
-the normative [`spec/PROTOCOL.md`](spec/PROTOCOL.md), and every implementation is held to it by
-the [conformance suite](conformance/). See [`spec/COMPATIBILITY.md`](spec/COMPATIBILITY.md) for
+two normative documents — [`spec/PROTOCOL.md`](spec/PROTOCOL.md) for the custom `Frame` path
+(Fetch unary + one WebSocket per stream) and [`spec/PROTOCOL_H2TS.md`](spec/PROTOCOL_H2TS.md)
+for the binary default, which is real gRPC over a tunnel and so mostly delegates to the
+HTTP/2 and gRPC specs. Every implementation is held to both by the
+[conformance suite](conformance/). See [`spec/COMPATIBILITY.md`](spec/COMPATIBILITY.md) for
 per-transport gRPC-semantics fidelity.
 
 ## Quickstart
@@ -153,7 +156,7 @@ UPSTREAM=http://localhost:50051 LISTEN=127.0.0.1:8080 cargo run -p grpc-webnext-
 
 | Component | Location | State |
 |---|---|---|
-| Wire protocol + normative spec | [`proto/`](proto/) · [`spec/PROTOCOL.md`](spec/PROTOCOL.md) | ✅ the contract |
+| Wire protocol + normative spec | [`proto/`](proto/) · [`spec/PROTOCOL.md`](spec/PROTOCOL.md) · [`spec/PROTOCOL_H2TS.md`](spec/PROTOCOL_H2TS.md) | ✅ the contract |
 | Rust server + proxy&nbsp;·&nbsp;[crates.io](https://crates.io/crates/grpc-webnext) | [`rust/crates/grpc-webnext`](rust/crates/grpc-webnext) | ✅ h2ts, custom `Frame`, `+json`, REST, deadlines, cancel, size limits, native same-port |
 | TypeScript client (browser + Node)&nbsp;·&nbsp;[npm](https://www.npmjs.com/package/@grpc-webnext/client) | [`node/packages/client`](node/packages/client) | ✅ h2ts + Fetch + WebSocket, typed codegen, callback + promise APIs |
 | Conformance suite | [`conformance/`](conformance/) | ✅ language-neutral cases × Rust **and** Go servers × TS driver, run over the real wire |
@@ -174,9 +177,10 @@ contract at the root.
 
 ```
 proto/                 wire envelope (Frame, Metadatum, …) — source of truth
-spec/                  PROTOCOL.md (normative) + COMPATIBILITY.md
+spec/                  PROTOCOL.md + PROTOCOL_H2TS.md (both normative) + COMPATIBILITY.md
 conformance/           language-neutral conformance suite (proto, cases, driver)
-doc/                   design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO_SERVER)
+doc/                   design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION,
+                       GO_SERVER, HTTPRULE_GAPS)
 
 rust/                  Cargo workspace
   crates/grpc-webnext/   server library + proxy binary (grpc-webnext-proxy)

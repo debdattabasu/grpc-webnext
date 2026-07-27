@@ -10,7 +10,7 @@ package grpc.webnext.v1;
 // (the method comes from the WS URL); then Message / HalfClose / Reset flow on
 // the same socket, and the server replies Header, Message(s), Trailer / Reset.
 // There is no multiplexing — no stream_id, no pool. (The binary default runs
-// real HTTP/2 over h2ts instead; see doc/H2TS_INTEGRATION.md.)
+// real HTTP/2 over h2ts instead; see spec/PROTOCOL_H2TS.md.)
 //
 // Rules (see spec/PROTOCOL.md):
 //   * Exactly one Frame per WebSocket message. No fragmentation.

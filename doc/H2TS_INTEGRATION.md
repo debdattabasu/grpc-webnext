@@ -1,5 +1,15 @@
 # h2ts integration plan
 
+> **Historical design record — not a specification.** This is the plan as written on
+> 2026-07-07, kept for its rationale: what was weighed, what was decided, and why. The
+> resulting path is **normatively specified** in
+> [`/spec/PROTOCOL_H2TS.md`](../spec/PROTOCOL_H2TS.md); where the two disagree, that one
+> wins. Phases 0–3 are done (see Phasing); the status line below is the original.
+>
+> Notably superseded: "the binary/h2ts path for Go/Node needs an h2ts gateway per runtime —
+> not yet built" was true when written; **Go shipped one on 2026-07-27**, and the current
+> per-implementation status lives in the spec rather than here.
+
 *2026-07-07. Status: **planned**, not started. Gated on the `h2ts` client publishing
 to npm (`h2ts-server` is already on crates.io). Decisions locked 2026-07-07; one item
 (client packaging) still open — see the end.*

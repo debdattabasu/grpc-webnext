@@ -59,8 +59,9 @@ differ only in an error-helper name). They are pure copies.
 
 ## The one real difference: local dispatch vs remote call
 
-Compare `server::unary` ([lib.rs:525](../crates/server/src/lib.rs#L525)) and
-`proxy::handle_unary` ([lib.rs:307](../crates/proxy/src/lib.rs#L307)). Both:
+Compare `server::unary` (`crates/server/src/lib.rs:525`) and `proxy::handle_unary`
+(`crates/proxy/src/lib.rs:307`) — pre-unification paths, cited as prose rather than links
+because the merge this document describes is what deleted those files. Both:
 
 1. parse the method path,
 2. stream the length-prefixed request body into a gRPC frame (`frame_upstream_request`),

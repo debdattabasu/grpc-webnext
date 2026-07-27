@@ -5,7 +5,8 @@
 grpc-webnext is now implemented five times over — Rust server + proxy, Go server, Node
 server, and TS + Rust clients — all speaking the single wire format in
 [`/proto/grpc_webnext.proto`](../proto/grpc_webnext.proto) and
-[`/spec/PROTOCOL.md`](../spec/PROTOCOL.md). Across languages you cannot share code, so the
+[`/spec/PROTOCOL.md`](../spec/PROTOCOL.md) + [`/spec/PROTOCOL_H2TS.md`](../spec/PROTOCOL_H2TS.md).
+Across languages you cannot share code, so the
 thing that guarantees they agree is a **language-neutral, wire-level conformance suite**:
 declarative scenarios, run over the actual transports, against every implementation.
 

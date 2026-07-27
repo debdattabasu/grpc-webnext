@@ -9,7 +9,7 @@ native in-process servers per language, plus a schema-agnostic proxy.
 ```
 proto/          wire envelope (Frame, Metadatum, …) — shared source of truth
                 + google/api/ — vendored HttpRule subset, the ONE copy everything includes
-spec/           PROTOCOL.md (normative) + COMPATIBILITY.md
+spec/           PROTOCOL.md + PROTOCOL_H2TS.md (both normative) + COMPATIBILITY.md
 conformance/    language-neutral conformance suite (proto, cases, contract)
 doc/            design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO_SERVER,
                 HTTPRULE_GAPS)
@@ -72,8 +72,12 @@ anywhere but the project root.
 ## Architecture
 
 One port; `content-type` and the WebSocket subprotocol disambiguate. Transport is a
-per-client config `{ codec, unary, streaming }` (Phases 1–3 of the h2ts pivot are done —
-see [doc/H2TS_INTEGRATION.md](doc/H2TS_INTEGRATION.md)):
+per-client config `{ codec, unary, streaming }`. **Two normative specs, one per path:**
+[spec/PROTOCOL.md](spec/PROTOCOL.md) for the custom `Frame` path and
+[spec/PROTOCOL_H2TS.md](spec/PROTOCOL_H2TS.md) for the binary h2ts default (short by design —
+it delegates to the HTTP/2 and gRPC specs and pins only the seams grpc-webnext owns).
+[doc/H2TS_INTEGRATION.md](doc/H2TS_INTEGRATION.md) is the *historical design record* behind
+that pivot, not a spec — don't cite it as one.
 
 - **Binary (default) → real gRPC over h2ts.** The browser speaks real HTTP/2 (trailers,
   multiplexing) tunneled over a WebSocket by [h2ts](https://github.com/debdattabasu/h2ts);
