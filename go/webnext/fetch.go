@@ -132,13 +132,15 @@ func (h *handler) unaryProto(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(encodeTrailerBlock(trailer))
 }
 
-// unaryJSON serves the `+json` codec (and, with AllowImplicitCodec, plain
-// `application/json`): JSON in, JSON out, with the gRPC status in the
-// `grpc-status` / `grpc-message` response headers. Unlike `+proto` this path
-// buffers — the transcode is whole-message and the status must precede the body.
+// unaryJSON serves the `+json` codec, REST-annotated URLs, and — with
+// AllowImplicitCodec — plain `application/json` on main paths: JSON in, JSON out,
+// with the gRPC status in the `grpc-status` / `grpc-message` response headers.
+// Unlike `+proto` this path buffers — the transcode is whole-message and the
+// status must precede the body.
 //
 // sdkJSON distinguishes the SDK content-type (`+json`, allowed on any main path)
-// from plain JSON (which needs AllowImplicitCodec to reach a main path).
+// from plain JSON (which needs AllowImplicitCodec to reach a main path). Neither
+// gate applies to a REST URL: annotated endpoints accept plain HTTP always.
 func (h *handler) unaryJSON(w http.ResponseWriter, r *http.Request, sdkJSON bool) {
 	defer r.Body.Close()
 
@@ -151,6 +153,39 @@ func (h *handler) unaryJSON(w http.ResponseWriter, r *http.Request, sdkJSON bool
 		jsonResponse(w, respCT, nil, uint32(codes.Unimplemented), "+json needs a transcoder", nil, nil)
 		return
 	}
+
+	// Read the body before routing: a REST binding may need it to build the
+	// request message, and the size limit applies either way.
+	body, err := readBounded(r.Body, h.cfg.maxMessageBytes())
+	if errors.Is(err, errTooLarge) {
+		// Not an HTTP 413: the JSON codec always carries status in the header, so
+		// both Fetch surfaces answer identically.
+		jsonResponse(w, respCT, nil, uint32(codes.ResourceExhausted), errTooLarge.Error(), nil, nil)
+		return
+	} else if err != nil {
+		jsonResponse(w, respCT, nil, uint32(codes.Internal), "read body: "+err.Error(), nil, nil)
+		return
+	}
+
+	deadline, hasDeadline := parseGRPCTimeout(r.Header)
+
+	// 1) A REST annotation binding? Path, query, and body build the method's
+	//    request message. Annotated routes always answer `application/json`,
+	//    whichever JSON content-type asked.
+	call, matched, err := h.cfg.Transcoder.transcodeHTTPRequest(
+		r.Method, r.URL.EscapedPath(), r.URL.RawQuery, body)
+	switch {
+	case err != nil:
+		jsonResponse(w, "application/json", nil, uint32(codes.InvalidArgument),
+			"bad REST request: "+err.Error(), nil, nil)
+		return
+	case matched:
+		h.jsonUpstream(w, r, call.grpcMethod, call.message, "application/json", deadline, hasDeadline)
+		return
+	}
+
+	// 2) A main gRPC method path. `+json` is the SDK contract; plain JSON needs
+	//    the flag.
 	if !sdkJSON && !h.cfg.AllowImplicitCodec {
 		textResponse(w, http.StatusUnsupportedMediaType,
 			"this gRPC method path requires content-type "+CTJSON+
@@ -162,24 +197,23 @@ func (h *handler) unaryJSON(w http.ResponseWriter, r *http.Request, sdkJSON bool
 		jsonResponse(w, respCT, nil, uint32(codes.Unimplemented), "no such method: "+path, nil, nil)
 		return
 	}
-
-	body, err := readBounded(r.Body, h.cfg.maxMessageBytes())
-	if errors.Is(err, errTooLarge) {
-		// Not an HTTP 413: the JSON codec always carries status in the header, so
-		// both Fetch surfaces answer identically.
-		jsonResponse(w, respCT, nil, uint32(codes.ResourceExhausted), errTooLarge.Error(), nil, nil)
-		return
-	} else if err != nil {
-		jsonResponse(w, respCT, nil, uint32(codes.Internal), "read body: "+err.Error(), nil, nil)
-		return
-	}
 	message, err := h.cfg.Transcoder.RequestJSONToProto(path, body)
 	if err != nil {
 		jsonResponse(w, respCT, nil, uint32(codes.InvalidArgument), "bad json request: "+err.Error(), nil, nil)
 		return
 	}
+	h.jsonUpstream(w, r, path, message, respCT, deadline, hasDeadline)
+}
 
-	deadline, hasDeadline := parseGRPCTimeout(r.Header)
+// jsonUpstream dispatches an already-encoded binary request and renders the
+// binary response as native JSON (bare body, status in `grpc-status` /
+// `grpc-message`). Both the `+json` main path and REST routes land here — they
+// differ only in how the request message was built.
+func (h *handler) jsonUpstream(
+	w http.ResponseWriter, r *http.Request,
+	path string, message []byte, respCT string,
+	deadline time.Duration, hasDeadline bool,
+) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -211,16 +245,18 @@ func (h *handler) unaryJSON(w http.ResponseWriter, r *http.Request, sdkJSON bool
 	}
 
 	initial, trailing := call.headers(), call.trailers()
-	code, message2 := readStatus(trailing, initial)
+	code, statusMessage := readStatus(trailing, initial)
 
 	var jsonBody []byte
 	if messages := deframeAll(respBody); code == 0 && len(messages) > 0 {
-		if jsonBody, err = h.cfg.Transcoder.ResponseProtoToJSON(path, messages[0]); err != nil {
+		encoded, err := h.cfg.Transcoder.ResponseProtoToJSON(path, messages[0])
+		if err != nil {
 			jsonResponse(w, respCT, nil, uint32(codes.Internal), "bad json response: "+err.Error(), nil, nil)
 			return
 		}
+		jsonBody = encoded
 	}
-	jsonResponse(w, respCT, jsonBody, code, message2, initial, trailing)
+	jsonResponse(w, respCT, jsonBody, code, statusMessage, initial, trailing)
 }
 
 // requestHeaders builds the headers for the dispatched gRPC call: the caller's

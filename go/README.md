@@ -6,9 +6,9 @@ tunnel** — in front of a native `grpc-go` server, on the same port as native g
 
 > **Status: implemented and in the conformance matrix.** Every case in
 > [`/conformance/cases`](../conformance/cases) runs against this server via the TypeScript
-> client driver, across every transport and codec, alongside the Rust server. The one
-> Rust-only surface is REST transcoding of `google.api.http` annotations (see
-> [Not implemented](#not-implemented)).
+> client driver, across every transport and codec, alongside the Rust server. It now
+> serves **every** spec surface the Rust in-process server does, REST transcoding of
+> `google.api.http` annotations included.
 
 ## Usage
 
@@ -84,6 +84,32 @@ gRPC status (never an HTTP 501), exactly as the Rust server does.
 | `application/grpc-webnext+proto` (POST) | unary, `[len\|message][len\|trailer]` | [`fetch.go`](webnext/fetch.go) |
 | `application/grpc-webnext+json` (POST) | unary, bare JSON + `grpc-status` header | [`fetch.go`](webnext/fetch.go) |
 | `grpc-webnext+proto` / `+json` WS subprotocol | streaming, one stream per socket | [`ws.go`](webnext/ws.go) |
+| a `google.api.http` URL (`/v1/…`) | the annotated RPC, JSON in and out | [`httprule.go`](webnext/httprule.go) |
+
+### REST transcoding
+
+Annotate a method with `google.api.http` and its `/v1/…` alias is served too — path
+segments, query params, and the body bind into the request message:
+
+```proto
+rpc GetUser(GetUserReq) returns (User) {
+  option (google.api.http) = { get: "/v1/users/{id}" };
+}
+```
+
+Annotated endpoints are **JSON-only**: they accept plain HTTP (blank / `application/json`)
+*and* `grpc-webnext+json`, and reject `+proto` with 415. A **streaming** method's
+annotation URL is a WebSocket endpoint (text-locked single-stream JSON); a body-less GET
+route builds its one request entirely from the URL. The annotation only *adds* the alias —
+the RPC's main `/pkg.Service/Method` path is unchanged.
+
+It needs the same `Transcoder` the `+json` codec does, and nothing more: bindings are
+compiled from the descriptor set at construction. `HasHTTPRules()` reports whether any
+were found, which is a useful startup assertion if you expect them.
+
+The supported subset — and, more usefully, the **unsupported** one and what each
+unsupported thing actually does — is [`doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md).
+Both server implementations share that list exactly.
 
 ## Layout
 
@@ -95,7 +121,7 @@ go/
     doc.go                    package overview
     config.go                 ServerConfig; content-type + subprotocol constants
     server.go                 Server (Serve/Shutdown), the surface router, drain tracking
-    fetch.go                  unary over Fetch (+proto and +json)
+    fetch.go                  unary over Fetch (+proto, +json, and REST routes)
     ws.go                     streaming over the custom `Frame` WebSocket protocol
     h2ts.go                   the real-HTTP/2 tunnel + its request-size limit
     dispatch.go               the in-process gRPC round trip (request/response/trailers)
@@ -103,9 +129,11 @@ go/
     metadata.go               header <-> metadata, grpc-timeout, the denylist
     jsonframe.go              the native-JSON frame codec
     transcode.go              JSON <-> protobuf via descriptors
+    httprule.go               google.api.http REST routing (port of Rust's httprule.rs)
     status.go                 WS close codes, grpc-message percent coding
     pb/                       generated from /proto/grpc_webnext.proto
   internal/conformance/       the ConformanceService implementation + its bindings
+  internal/testecho/          the Echo service carrying the shared REST annotations
   examples/greeter/           the shared Greeter demo service
   examples/conformance-server/  the conformance-matrix entry point
 ```
@@ -146,11 +174,6 @@ than as a `go_package` option, so the shared contract stays language-neutral.
 
 ## Not implemented
 
-- **REST transcoding** of `google.api.http` annotations (the `/v1/…` routes and their
-  WebSocket form). The `+json` *codec* is fully supported on both surfaces; only the
-  annotated REST aliases are Rust-only. A plain-HTTP request that matches no binding
-  behaves as the spec says it should: it reaches a main gRPC path only with
-  `AllowImplicitCodec`, else `415`.
 - **Proxy mode.** The standalone, schema-agnostic proxy is a single implementation, the
   Rust `grpc-webnext-proxy` binary. The abstraction Rust needs for it (a `Backend` enum
   over in-process and upstream) collapses to nothing in Go, where a gRPC server already

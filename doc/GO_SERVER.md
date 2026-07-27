@@ -1,8 +1,8 @@
 # Go in-process server
 
 *2026-07-27. Status: **implemented and in the conformance matrix**. The Go server serves
-every surface the Rust in-process server does except REST transcoding, and every case in
-`conformance/cases/` now runs against **both** server implementations.*
+every surface the Rust in-process server does, REST transcoding included, and every case
+in `conformance/cases/` runs against **both** server implementations.*
 
 ## What was built
 
@@ -17,9 +17,11 @@ dependencies) to a full implementation:
 | Fetch unary `+json` | `fetch.go` | buffered (the transcode is whole-message, status precedes the body) |
 | WebSocket streaming | `ws.go` | one stream per socket, both codecs, keepalive, deadlines, single-stream teardown |
 | JSON ⇄ protobuf | `transcode.go` | `protodesc` + `dynamicpb` + `protojson` over a `FileDescriptorSet` |
+| REST (`google.api.http`) | `httprule.go` | added 2026-07-27; both surfaces (Fetch `/v1/…` and the WebSocket form) |
 
 Plus `internal/conformance` (the `ConformanceService` implementation, shared by the binary
-and the tests), `examples/conformance-server`, and `examples/greeter`.
+and the tests), `internal/testecho` (the Echo service carrying the shared REST
+annotations), `examples/conformance-server`, and `examples/greeter`.
 
 ### The one structural difference from Rust
 
@@ -121,6 +123,53 @@ the proxy exists not to parse. Recorded rather than papered over.
   `-race` run. Replaced with an explicit mutex-guarded counter that signals once draining
   has begun and the count reaches zero.
 
+## REST transcoding (2026-07-27)
+
+The last Rust-only surface, closed the same way the rest of the port was: `httprule.go` is
+a **structurally parallel** port of `httprule.rs` — same segment/body model, same matching
+order, same coercion table — so the two can be read side by side. Both surfaces are wired:
+Fetch tries a REST binding before the main method path (and before the implicit-codec
+gate, since annotated endpoints accept plain HTTP unconditionally), and a WebSocket
+upgrade whose URL matches a binding becomes a text-locked single-stream JSON route,
+rejecting a `+proto` subprotocol with close `4009`.
+
+Three details are load-bearing and easy to get wrong in Go specifically:
+
+- **`r.URL.EscapedPath()`, not `r.URL.Path`.** net/http has already percent-decoded
+  `Path`, so an encoded `%2F` inside a segment would arrive as a segment *separator* and
+  split the path differently than the template expects. The router does its own decoding,
+  after splitting, exactly as Rust does.
+- **Binding order is taken from the `FileDescriptorSet`, not from the registry.** First
+  match wins, so precedence must be deterministic — and `protoregistry.Files.RangeFiles`
+  iterates a map. Walking `fds.GetFile()` in order restores both determinism and parity
+  with Rust's descriptor-pool order.
+- **The `google.api.http` extension resolves through the global type registry.**
+  `httprule.go` imports the annotations package for that side effect; without it the
+  option lands in unknown fields and every annotation silently disappears. `startEcho` in
+  the tests asserts `HasHTTPRules()` up front so that failure mode can't masquerade as
+  "no routes configured".
+
+### The finding: a custom verb was stripped rather than matched
+
+Writing the port surfaced a **mis-routing bug present in both implementations**, which is
+exactly what a second implementation is for. `parse_template` cut everything after the
+first `:` and discarded it, so a binding for `/v1/things/{id}:cancel` compiled to the same
+template as `/v1/things/{id}` — meaning `GET /v1/things/5` reached the `:cancel` binding,
+`GET /v1/things/5:cancel` bound `id = "5:cancel"`, and two custom verbs on one resource
+collided on the first-declared. Fixed in Rust and Go together: the verb rides on the
+binding and is matched in both directions. Full write-up, plus every remaining gap and
+what it actually does, in [HTTPRULE_GAPS.md](HTTPRULE_GAPS.md).
+
+### Coverage, and its honest limit
+
+The Go REST tests drive the **same** `echo.proto` annotations the Rust tests drive, through
+the same URLs, with each Go test naming its Rust counterpart. That is deliberate: two
+implementations of one contract need something asserting they answer alike, and
+`conformance/` cannot yet do it for REST (the conformance proto carries no annotations, and
+a REST case is a raw `(verb, URL, body)` the TS driver has no helper for). So this is
+agreement *by construction* rather than agreement *proved by one harness* — a stopgap, and
+recorded as one in `conformance/README.md`.
+
 ## Recorded decisions (differences that are not bugs)
 
 - **Trailers-only responses.** tonic emits a gRPC error carrying no message as a genuine
@@ -146,9 +195,16 @@ the proxy exists not to parse. Recorded rather than papered over.
   chunk boundaries, metadata, `grpc-timeout`, percent coding, JSON frame-kind priority) and
   end-to-end tests over real sockets covering all four RPC cardinalities on both codecs,
   deadlines, size limits, metadata fidelity, handshake rejection and codec inference,
-  keepalive pings, native gRPC passthrough, and graceful shutdown. Run under `-race` in CI,
-  since a WebSocket connection has a reader, a writer, and a keepalive ticker on it — and
-  since that is what caught the WaitGroup misuse above.
+  keepalive pings, native gRPC passthrough, graceful shutdown, and REST transcoding on both
+  surfaces. Run under `-race` in CI, since a WebSocket connection has a reader, a writer,
+  and a keepalive ticker on it — and since that is what caught the WaitGroup misuse above.
+- The REST unit tests (`webnext/httprule_test.go`) bind against a **synthetic** message
+  built from a `FileDescriptorProto` in the test itself, so every coercion branch — each
+  scalar width, enum by name and by number, bytes, repeated, nested — is reachable without
+  bending the shared `echo.proto` into a test fixture. The last section of that file pins
+  the *unsupported* HttpRule features: those tests assert current behavior deliberately, so
+  implementing one of them breaks its test, which is the tripwire keeping
+  `HTTPRULE_GAPS.md` honest.
 - The shutdown suites (`webnext/shutdown_test.go`, `tests/inproc_shutdown.rs`) test the two
   failure modes that matter: a drain that returns too early cuts live RPCs, and one that
   returns too late hangs a deploy. So every case asserts *both* that in-flight work
@@ -161,9 +217,6 @@ the proxy exists not to parse. Recorded rather than papered over.
 
 ## Not implemented
 
-- **REST transcoding** of `google.api.http` annotations (`/v1/…` routes and their WebSocket
-  form). The `+json` codec itself is fully supported on both surfaces. This is the only
-  spec surface the Go server does not serve; the conformance suite does not cover REST
-  routes yet either (see `conformance/README.md` "Not yet covered"), so adding them is one
-  piece of work spanning the suite and this server.
-- **Proxy mode**, by design (above).
+- **Proxy mode**, by design (above). Every *spec surface* is now served.
+- The HttpRule subset has gaps, but they are **shared with Rust**, not Go-specific:
+  [HTTPRULE_GAPS.md](HTTPRULE_GAPS.md).

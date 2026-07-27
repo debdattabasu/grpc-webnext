@@ -4,7 +4,14 @@
 > conformance matrix, which now runs every case against both server implementations.
 > Writing the second implementation surfaced two real Rust bugs — `-bin` metadata dropped
 > on the WebSocket path, and a size-limit `Reset` that left the socket open — both fixed,
-> both now pinned by tests. See `doc/GO_SERVER.md`.
+> both now pinned by tests. Graceful shutdown and REST (`google.api.http`) transcoding
+> landed later the same day, taking Go to full spec-surface parity; the REST port turned
+> up a **third** shared bug, this one a mis-route: a trailing custom verb
+> (`/v1/things/{id}:cancel`) was *stripped* from the template rather than matched, so the
+> binding also answered the bare `/v1/things/5`, captured `id = "5:cancel"` from the verb
+> URL, and collided with every other verb on that resource. Fixed in both languages, and
+> the full HttpRule subset is now audited in `doc/HTTPRULE_GAPS.md`. See
+> `doc/GO_SERVER.md`.
 
 > **Note (2026-07-05):** the `grpc-webnext-core`, `-server`, `-proxy`, and `-transport`
 > crates were unified into a single `grpc-webnext` crate (library + proxy binary) — see

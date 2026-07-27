@@ -10,7 +10,8 @@ native in-process servers per language, plus a schema-agnostic proxy.
 proto/          wire envelope (Frame, Metadatum, …) — shared source of truth
 spec/           PROTOCOL.md (normative) + COMPATIBILITY.md
 conformance/    language-neutral conformance suite (proto, cases, contract)
-doc/            design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO_SERVER)
+doc/            design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO_SERVER,
+                HTTPRULE_GAPS)
 rust/           Cargo workspace  ← NOTE: the workspace is here, NOT the repo root
   crates/grpc-webnext/   server library + proxy binary (grpc-webnext-proxy)
   crates/testecho/       test-only Echo service
@@ -20,8 +21,9 @@ node/           npm workspace
   packages/client/       @grpc-webnext/client (Fetch + WebSocket)  ✅
   packages/server/       @grpc-webnext/server (in-process)  ⬜ skeleton
 go/             Go module github.com/grpc-webnext/grpc-webnext/go
-  webnext/               in-process server (Fetch + WS + h2ts + native)  ✅ (no REST)
+  webnext/               in-process server (Fetch + WS + h2ts + native + REST)  ✅
   internal/conformance/  ConformanceService impl, shared by the binary and the tests
+  internal/testecho/     Echo impl (the shared google.api.http REST fixtures)
   examples/              greeter, conformance-server
 ```
 
@@ -29,7 +31,7 @@ go/             Go module github.com/grpc-webnext/grpc-webnext/go
 
 ```bash
 # Rust (server + proxy live in one crate). Run from rust/.
-cd rust && cargo test --workspace          # 91 tests
+cd rust && cargo test --workspace          # 93 tests
 cd rust && cargo clippy --workspace --all-targets   # keep clean
 
 # TypeScript. Install from the npm workspace root (node/), NOT from a package — npm
@@ -142,6 +144,14 @@ hides.
   (run every server impl × every client driver over the real wire). It runs each case
   against the Rust **and** Go servers; a new impl is one entry in the `SERVERS` table in
   `node/packages/client/test/conformance.test.ts`.
+- **REST (`google.api.http`) is the one surface the matrix does not cover**, so the two
+  routers (`rust/.../httprule.rs`, `go/webnext/httprule.go`) are held together by being
+  *structurally parallel ports* plus a shared fixture: both test suites drive the same
+  `echo.proto` annotations through the same URLs, each Go test naming its Rust
+  counterpart. Change one router, change the other in the same commit. The supported and
+  unsupported surface — and what each unsupported thing actually *does* — is
+  `doc/HTTPRULE_GAPS.md`; every gap there has a test pinning current behavior, so adding
+  support means changing that test.
 - A conformance case whose `transports:` lists `websocket` only actually exercises the
   WebSocket if the RPC is a **streaming** one — a unary call takes the Fetch path under
   every transport profile. That blind spot hid a real bug for a while; see

@@ -208,6 +208,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// `application/grpc-webnext+…` also starts with `application/grpc`.
 	switch ct := r.Header.Get("Content-Type"); {
 	case ct == CTProto:
+		// Binary is the SDK contract on main paths. A REST-annotated URL is
+		// JSON-only, so binary there is the wrong surface — reject explicitly
+		// rather than treating the REST path as an unknown gRPC method.
+		if h.isRESTURL(r) {
+			http.Error(w, "REST-annotated endpoints are JSON-only; use application/json or "+CTJSON,
+				http.StatusUnsupportedMediaType)
+			return
+		}
 		h.unaryProto(w, r)
 	case ct == CTJSON:
 		h.unaryJSON(w, r, true)
@@ -220,4 +228,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unsupported content-type: "+ct, http.StatusUnsupportedMediaType)
 	}
+}
+
+// isRESTURL reports whether the request URL matches a `google.api.http` binding.
+// It matches on the path alone (verb-agnostic), because the question here is
+// "is this URL a REST surface at all", not "does this call route".
+//
+// EscapedPath, not Path: net/http has already percent-decoded Path, which would
+// turn an encoded `%2F` inside a segment into a segment separator.
+func (h *handler) isRESTURL(r *http.Request) bool {
+	return h.cfg.Transcoder != nil &&
+		h.cfg.Transcoder.matchWS(r.URL.EscapedPath(), r.URL.RawQuery) != nil
 }

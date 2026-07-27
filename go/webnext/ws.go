@@ -46,8 +46,15 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(*http.Request) bool { return true },
 }
 
-// handleUpgrade resolves the codec from the offered subprotocols, runs the
-// connection gate, then upgrades and serves the one stream.
+// wsRejection is a handshake-time refusal: the connection still upgrades, then
+// closes with a `4000 + code` frame so browser JS can read the gRPC status.
+type wsRejection struct {
+	code    codes.Code
+	message string
+}
+
+// handleUpgrade resolves the route and codec from the URL and the offered
+// subprotocols, runs the surface gate, then upgrades and serves the one stream.
 func (h *handler) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	offered := h2ts.OfferedProtocols(r)
 	has := func(s string) bool {
@@ -66,6 +73,13 @@ func (h *handler) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An annotation route: the upgrade URL matches a `google.api.http` binding.
+	// A WS upgrade is always a GET, so the match is verb-agnostic.
+	var ann *wsBinding
+	if h.cfg.Transcoder != nil {
+		ann = h.cfg.Transcoder.matchWS(r.URL.EscapedPath(), r.URL.RawQuery)
+	}
+
 	// codec: nil = infer from the first frame (only reachable with implicit
 	// codecs); explicit = a grpc-webnext codec subprotocol was offered.
 	var codec *bool
@@ -79,10 +93,21 @@ func (h *handler) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		codec = ptr(true)
 	}
 
-	// A main-endpoint WebSocket needs a grpc-webnext codec subprotocol unless
-	// implicit codecs are allowed. A rejected handshake still completes, then
-	// closes with a `4000 + code` frame so browser JS can read the status.
-	rejected := !explicit && !h.cfg.AllowImplicitCodec
+	// Surface gating (see spec/PROTOCOL.md "Content types"): a REST route is
+	// text-locked JSON and rejects a binary subprotocol; a main-endpoint
+	// WebSocket needs a grpc-webnext codec subprotocol unless implicit codecs
+	// are allowed.
+	var reject *wsRejection
+	switch {
+	case ann != nil && codec != nil && !*codec:
+		reject = &wsRejection{codes.FailedPrecondition,
+			"REST WebSocket routes are JSON: use a blank, application/json, or grpc-webnext+json subprotocol"}
+	case ann != nil:
+		codec = ptr(true) // blank / application/json / +json all mean JSON here
+	case !explicit && !h.cfg.AllowImplicitCodec:
+		reject = &wsRejection{codes.Unimplemented,
+			"this websocket requires a grpc-webnext+proto or grpc-webnext+json subprotocol"}
+	}
 
 	respHeader := http.Header{}
 	for _, p := range []string{WSSubprotocolProto, WSSubprotocolJSON, WSSubprotocol, "application/json"} {
@@ -98,12 +123,11 @@ func (h *handler) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	if rejected {
-		closeWithStatus(conn, codes.Unimplemented,
-			"this websocket requires a grpc-webnext+proto or grpc-webnext+json subprotocol")
+	if reject != nil {
+		closeWithStatus(conn, reject.code, reject.message)
 		return
 	}
-	h.serveWS(conn, r, codec)
+	h.serveWS(conn, r, codec, ann)
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -179,7 +203,9 @@ func encodeOutbound(f *pb.Frame, jsonCodec bool) (wsOutbound, bool) {
 
 // serveWS runs one connection: a writer goroutine owning the socket (plus
 // keepalive), and this goroutine reading frames and driving the single stream.
-func (h *handler) serveWS(conn *websocket.Conn, r *http.Request, codec *bool) {
+// A non-nil `ann` means this is a REST annotation route rather than a main
+// endpoint: the method and the request-message shape come from the binding.
+func (h *handler) serveWS(conn *websocket.Conn, r *http.Request, codec *bool, ann *wsBinding) {
 	conn.SetReadLimit(wsReadLimit)
 
 	c := &wsConn{
@@ -205,7 +231,12 @@ func (h *handler) serveWS(conn *websocket.Conn, r *http.Request, codec *bool) {
 	conn.SetPongHandler(func(string) error { refresh(); return nil })
 	refresh()
 
+	// The one stream's route. On a main endpoint that is the WS URL itself; on an
+	// annotation route it is the gRPC method the binding resolved to.
 	methodURL := r.URL.RequestURI()
+	if ann != nil {
+		methodURL = ann.method()
+	}
 	opened := false
 	var stream *wsStream
 	defer func() {
@@ -245,7 +276,7 @@ func (h *handler) serveWS(conn *websocket.Conn, r *http.Request, codec *bool) {
 		if frame == nil {
 			continue
 		}
-		h.handleFrame(r, c, frame, *codec, &stream)
+		h.handleFrame(r, c, frame, *codec, ann, &stream)
 	}
 }
 
@@ -363,7 +394,7 @@ func (s *wsStream) abort() {
 // request messages, half-close, or reset. A rejected Subscribe is answered with
 // a Reset on the same (still-open) connection — per-RPC authorization lives in
 // the service, so there is no auth-driven connection teardown here.
-func (h *handler) handleFrame(r *http.Request, c *wsConn, frame *pb.Frame, jsonCodec bool, stream **wsStream) {
+func (h *handler) handleFrame(r *http.Request, c *wsConn, frame *pb.Frame, jsonCodec bool, ann *wsBinding, stream **wsStream) {
 	switch kind := frame.GetKind().(type) {
 	case *pb.Frame_Subscribe:
 		sub := kind.Subscribe
@@ -385,8 +416,16 @@ func (h *handler) handleFrame(r *http.Request, c *wsConn, frame *pb.Frame, jsonC
 		if payload := sub.GetInitialPayload(); len(payload) > 0 {
 			s.requests <- payload // the buffer is empty, so this cannot block
 		}
+		// A body-less annotation route (a GET-style server stream) builds its one
+		// request entirely from the URL, so there is nothing more to wait for:
+		// inject an empty payload and half-close immediately.
+		if ann != nil && !ann.hasBody() {
+			s.requests <- nil
+			s.halfClosed = true
+			close(s.requests)
+		}
 		*stream = s
-		go h.runStream(r, c, s, sub, jsonCodec)
+		go h.runStream(r, c, s, sub, jsonCodec, ann)
 
 	case *pb.Frame_Message:
 		payload := kind.Message.GetPayload()
@@ -429,7 +468,7 @@ func (h *handler) handleFrame(r *http.Request, c *wsConn, frame *pb.Frame, jsonC
 
 // runStream dispatches the one stream and pumps the gRPC response back out as
 // frames, closing the socket when it terminates.
-func (h *handler) runStream(r *http.Request, c *wsConn, s *wsStream, sub *pb.Subscribe, jsonCodec bool) {
+func (h *handler) runStream(r *http.Request, c *wsConn, s *wsStream, sub *pb.Subscribe, jsonCodec bool, ann *wsBinding) {
 	path := sub.GetMethod()
 
 	// JSON needs a transcoder. A capability gap (no schema, or an unknown
@@ -475,10 +514,16 @@ func (h *handler) runStream(r *http.Request, c *wsConn, s *wsStream, sub *pb.Sub
 			case <-s.ctx.Done():
 				return
 			}
+			// A malformed JSON message forwards as the default message, matching
+			// the Rust server rather than inventing a new error surface.
 			message := payload
-			if tc != nil {
-				// A malformed JSON message forwards as the default message,
-				// matching the Rust server rather than inventing a new error.
+			switch {
+			case ann != nil:
+				// An annotation route builds each message from the URL's path and
+				// query bindings, overlaid on this frame's JSON body (none, for a
+				// body-less GET-style route).
+				message, _ = ann.buildMessage(payload)
+			case tc != nil:
 				message, _ = tc.RequestJSONToProto(path, payload)
 			}
 			if _, err := call.reqBody.Write(grpcFrame(message)); err != nil {

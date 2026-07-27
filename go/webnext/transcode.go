@@ -27,10 +27,12 @@ import (
 )
 
 // Transcoder converts application messages between JSON and binary protobuf,
-// keyed by gRPC method path (`/pkg.Service/Method`).
+// keyed by gRPC method path (`/pkg.Service/Method`), and maps `google.api.http`
+// REST bindings onto gRPC methods.
 type Transcoder struct {
 	files   *protoregistry.Files
 	methods map[string]protoreflect.MethodDescriptor
+	router  *httpRouter
 }
 
 // NewTranscoder builds a Transcoder from an encoded FileDescriptorSet.
@@ -61,7 +63,26 @@ func NewTranscoder(fileDescriptorSet []byte) (*Transcoder, error) {
 		}
 		return true
 	})
+	t.router = newHTTPRouter(files, &fds)
 	return t, nil
+}
+
+// HasHTTPRules reports whether any `google.api.http` REST bindings were compiled
+// from the descriptor set — i.e. whether this transcoder serves REST routes at
+// all, on top of the `+json` codec it always serves.
+func (t *Transcoder) HasHTTPRules() bool { return !t.router.isEmpty() }
+
+// transcodeHTTPRequest maps a REST request onto a gRPC call. The bool reports
+// whether any binding matched; a miss is not an error, it means "this is a main
+// gRPC method path, not a REST URL".
+func (t *Transcoder) transcodeHTTPRequest(method, path, query string, body []byte) (*httpCall, bool, error) {
+	return t.router.transcode(method, path, query, body)
+}
+
+// matchWS resolves a WebSocket annotation route from its upgrade path, or nil if
+// the path matches no binding.
+func (t *Transcoder) matchWS(path, query string) *wsBinding {
+	return t.router.matchWS(path, query)
 }
 
 // HasMethod reports whether `path` (`/pkg.Service/Method`) resolves to a method

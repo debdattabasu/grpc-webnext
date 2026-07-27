@@ -134,11 +134,22 @@ An annotation only **adds** the REST alias; it does not change the RPC's main pa
 which stays reachable by its grpc-webnext content-types/subprotocols (the SDK contract)
 and — when `allow_implicit_codec` is on — by plain HTTP like any other main path.
 
-Supported subset: verbs `get/put/post/delete/patch` + `custom`; `additional_bindings`;
-path templates with literal segments, `{field}`/`{field=*}` single-segment captures,
-`{field=**}` rest-captures, and dotted field paths; `body: "*"` / `body: "<field>"` /
-none; query-param binding to scalar/repeated fields. Not yet: `response_body`, regex
-path patterns, non-scalar query binding (see `crates/grpc-webnext/src/httprule.rs`).
+Supported subset: verbs `get/put/post/delete/patch` + `custom`; a trailing custom verb
+(`/v1/things/{id}:cancel`), which is **matched, not stripped** — a binding that declares
+one answers only URLs carrying it, and a binding that declares none never answers a URL
+that carries one (a colon in path *data* is percent-encoded, so it still binds);
+`additional_bindings`; path templates with literal segments, `{field}`/`{field=*}`
+single-segment captures, `{field=**}` rest-captures, and dotted field paths;
+`body: "*"` / `body: "<field>"` / none; query-param binding to scalar/repeated fields.
+Where several bindings can match one URL, the **first in descriptor order wins** — there
+is no specificity ranking.
+
+Not supported — the same list in both server implementations, enumerated with its
+consequences in [`doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md): `response_body`
+(silently ignored, so the whole response message comes back), `HttpRule.selector` /
+service-config rule lists, bare `*`/`**` segments and multi-segment patterns like
+`{name=shelves/*}`, non-scalar query binding (including well-known types such as
+`FieldMask`), and scalar/repeated/dotted `body` fields.
 
 ## Streaming — WebSocket
 

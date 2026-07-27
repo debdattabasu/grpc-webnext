@@ -127,6 +127,19 @@ unproven.
 connection-level auth (Subscribe rejection), REST/HttpRule transcoding routes, half-close
 ordering edge cases. Add these as new suites; extend the table when you do.
 
+REST is the largest of those, and now the most costly: **both** servers serve
+`google.api.http` routes (Go joined Rust on 2026-07-27), so there are two implementations
+with nothing cross-checking them here. Two things stand in the way, and both are backlog
+items in their own right: `conformance.proto` carries no annotations — adding them means
+every implementation must vendor `google/api/*.proto` — and a REST case is a raw
+`(verb, URL, body)` rather than an RPC, which the TS client driver has no helper for.
+Until that lands, the stand-in is a **shared fixture**: both servers' REST tests drive the
+same [`echo.proto`](../rust/crates/testecho/proto/echo.proto) annotations through the same
+URLs, each Go test naming its Rust counterpart
+([`go/webnext/httprule_e2e_test.go`](../go/webnext/httprule_e2e_test.go)). That is weaker
+than the matrix — two suites agreeing by construction, not one harness proving it — so it
+is a stopgap, not a substitute.
+
 ## Running
 
 The harness is the TypeScript driver in

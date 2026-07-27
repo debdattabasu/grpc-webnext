@@ -5,6 +5,7 @@
 //! This is a practical subset of the HttpRule spec — enough for the common
 //! `get: "/v1/x/{id}"` / `post: "/v1/x" body: "*"` bindings:
 //!   * verbs `get/put/post/delete/patch` and `custom{kind}`,
+//!   * a trailing custom verb (`/v1/things/{id}:cancel`), matched not stripped,
 //!   * `additional_bindings` (one level),
 //!   * path templates: literal segments, `{field}` / `{field=*}` single-segment
 //!     captures, and `{field=**}` (or a trailing segment) capturing the rest,
@@ -12,8 +13,12 @@
 //!   * `body: "*"` (whole message), `body: "<field>"` (a sub-message field), or none,
 //!   * query params bound to (possibly nested) scalar/repeated fields.
 //!
-//! Not yet handled (see BACKLOG): `response_body`, regex path patterns beyond
-//! `*`/`**`, and non-scalar query binding.
+//! `go/webnext/httprule.go` is the deliberately parallel port of this file — same
+//! segment/body model, same matching order, same coercion table — so the two
+//! implementations can be compared side by side. The unsupported surface is
+//! identical and enumerated in `doc/HTTPRULE_GAPS.md`: `response_body`,
+//! `HttpRule.selector` (service-config rules), path patterns beyond a bare
+//! `*`/`**`, non-scalar query binding, and scalar/repeated/dotted body fields.
 
 use prost_reflect::prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, Kind, MessageDescriptor, ReflectMessage, Value};
@@ -52,6 +57,9 @@ enum BodyRule {
 struct Binding {
     http_method: String, // upper-case, e.g. "GET"
     segments: Vec<Segment>,
+    /// The template's trailing `:verb` (without the colon), empty if it has none.
+    /// It is *matched*, not merely stripped — see [`match_segments`].
+    custom_verb: String,
     body: BodyRule,
     grpc_method: String, // "/pkg.Service/Method"
     input: MessageDescriptor,
@@ -132,7 +140,7 @@ impl HttpRouter {
     /// is always an HTTP GET, so this matches on the path only (verb-agnostic).
     pub fn match_ws(&self, path: &str, query: Option<&str>) -> Option<WsBinding> {
         for b in &self.bindings {
-            if let Some(vars) = match_segments(&b.segments, path) {
+            if let Some(vars) = match_segments(&b.segments, &b.custom_verb, path) {
                 return Some(WsBinding {
                     binding: b.clone(),
                     vars,
@@ -156,7 +164,7 @@ impl HttpRouter {
             if b.http_method != want {
                 continue;
             }
-            if let Some(vars) = match_segments(&b.segments, path) {
+            if let Some(vars) = match_segments(&b.segments, &b.custom_verb, path) {
                 return Some((b, vars));
             }
         }
@@ -197,9 +205,11 @@ fn push_binding(bindings: &mut Vec<Binding>, rule: &DynamicMessage, grpc_method:
     let Some((http_method, template)) = verb_and_path(rule) else {
         return;
     };
+    let (segments, custom_verb) = parse_template(&template);
     bindings.push(Binding {
         http_method,
-        segments: parse_template(&template),
+        segments,
+        custom_verb,
         body: body_rule(rule),
         grpc_method: grpc_method.to_string(),
         input: input.clone(),
@@ -238,10 +248,16 @@ fn body_rule(rule: &DynamicMessage) -> BodyRule {
     }
 }
 
-/// Parse a path template into segments. A trailing `:verb` is ignored.
-fn parse_template(template: &str) -> Vec<Segment> {
-    let path = template.split(':').next().unwrap_or(template);
-    path.trim_matches('/')
+/// Parse a path template into segments plus its trailing custom verb
+/// (`/v1/things/{id}:cancel` -> the `cancel`), which the caller matches rather
+/// than discards.
+fn parse_template(template: &str) -> (Vec<Segment>, String) {
+    let (path, custom_verb) = match template.split_once(':') {
+        Some((path, verb)) => (path, verb.to_string()),
+        None => (template, String::new()),
+    };
+    let segments = path
+        .trim_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
         .map(|seg| {
@@ -257,12 +273,34 @@ fn parse_template(template: &str) -> Vec<Segment> {
                 Segment::Literal(seg.to_string())
             }
         })
-        .collect()
+        .collect();
+    (segments, custom_verb)
 }
 
 /// Match a request path against a template, returning captured `(field_path, value)`.
-fn match_segments(segments: &[Segment], path: &str) -> Option<Vec<PathVar>> {
-    let parts: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+///
+/// `custom_verb` is the template's trailing `:verb`, and it is part of the match in
+/// both directions: a binding that declares one matches only paths carrying it (the
+/// verb is stripped before the last segment binds), and a binding that declares none
+/// never matches a path that carries one. Stripping the verb from the *template*
+/// alone would make `/v1/things/{id}:cancel` match the bare `/v1/things/5` and
+/// capture `id = "5:cancel"` from `/v1/things/5:cancel`, with every custom verb on a
+/// resource collapsing onto one template. A genuine colon in path data is
+/// percent-encoded, so it survives this check.
+fn match_segments(segments: &[Segment], custom_verb: &str, path: &str) -> Option<Vec<PathVar>> {
+    let mut parts: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    match parts.last() {
+        Some(last) => {
+            let (head, verb) = last.split_once(':').unwrap_or((last, ""));
+            if verb != custom_verb || (head.is_empty() && last.contains(':')) {
+                return None;
+            }
+            let index = parts.len() - 1;
+            parts[index] = head;
+        }
+        None if !custom_verb.is_empty() => return None,
+        None => {}
+    }
     let mut vars = Vec::new();
     let mut i = 0;
     for seg in segments {
@@ -448,4 +486,51 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A trailing `:verb` is matched, not merely stripped from the template.
+    /// Without that, `{id}:cancel` would also answer the bare resource URL and
+    /// would capture `id = "5:cancel"` — and every custom verb on one resource
+    /// would collide on a single template. The Go router is pinned by the same
+    /// case (`go/webnext/httprule_test.go::TestMatchSegmentsCustomVerb`).
+    #[test]
+    fn custom_verb_is_part_of_the_match() {
+        let (cancel, verb) = parse_template("/v1/things/{id}:cancel");
+        assert_eq!(verb, "cancel");
+
+        // The verb must be present, and it does not leak into the capture.
+        let vars = match_segments(&cancel, &verb, "/v1/things/5:cancel").expect("should match");
+        assert_eq!(vars, vec![(vec!["id".to_string()], "5".to_string())]);
+
+        // The bare resource URL belongs to a different binding, and so does a
+        // different verb on the same resource.
+        assert!(match_segments(&cancel, &verb, "/v1/things/5").is_none());
+        assert!(match_segments(&cancel, &verb, "/v1/things/5:archive").is_none());
+
+        // Symmetrically, a verb-less binding does not swallow a custom-verb URL.
+        let (plain, plain_verb) = parse_template("/v1/things/{id}");
+        assert!(plain_verb.is_empty());
+        assert!(match_segments(&plain, &plain_verb, "/v1/things/5:cancel").is_none());
+
+        // A percent-encoded colon is data, not a verb separator, so it still binds.
+        let vars = match_segments(&plain, &plain_verb, "/v1/things/urn%3Afoo").expect("should match");
+        assert_eq!(vars, vec![(vec!["id".to_string()], "urn:foo".to_string())]);
+    }
+
+    /// A path pattern richer than a bare `*`/`**` — `{name=shelves/*}` — is split
+    /// on `/` before braces are examined, so it compiles to literal segments and
+    /// the binding matches nothing it was meant to. It fails closed, but
+    /// silently; see `doc/HTTPRULE_GAPS.md`.
+    #[test]
+    fn nested_path_patterns_are_unsupported() {
+        let (segments, _) = parse_template("/v1/{name=shelves/*/books/*}");
+        assert!(match_segments(&segments, "", "/v1/shelves/1/books/2").is_none());
+        assert!(match_segments(&segments, "", "/v1/anything").is_none());
+        assert_eq!(segments.len(), 5);
+        assert!(segments.iter().all(|s| matches!(s, Segment::Literal(_))));
+    }
 }

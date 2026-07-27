@@ -6,9 +6,10 @@ blocks the current milestone; each is a follow-up pass.
 > **Swept 2026-07-27.** Several items had been overtaken by the h2ts pivot (which retired
 > multiplexing and the WS pool) and by the `+json`/transcoding work, and two contradicted
 > `[x]` entries elsewhere in this same file. Each is now closed with the evidence that
-> closes it rather than left as a standing TODO. What remains genuinely open: graceful
-> shutdown, the Envoy filters, the HttpRule tail (plus Go REST), TS client retry/reconnect
-> and consumer backpressure, and one vestigial proto field.
+> closes it rather than left as a standing TODO. What remains genuinely open: the Envoy
+> filters, the HttpRule tail, REST conformance cases + the TS REST helper, TS client
+> retry/reconnect and consumer backpressure, and one vestigial proto field.
+> *(Graceful shutdown and Go REST transcoding both landed later the same day.)*
 >
 > A pattern worth naming: **three separate items — backpressure, large-payload streaming, and
 > fragmentation — all closed with the same answer.** Each was a bespoke solution to a problem
@@ -199,9 +200,27 @@ needing verification.
   match first and falls back to a direct `/pkg.Service/Method` JSON call. Covered by
   `server/tests/json.rs` (`transcode_*`). The google/api protos are vendored under
   `crates/testecho/proto/google/api/` for the test service.
-- [ ] **Unsupported HttpRule bits:** `response_body` (response comes back whole),
-  regex path patterns beyond `*`/`**`, non-scalar query binding, and repeated-message
-  body fields. Add as needed.
+- [ ] **Unsupported HttpRule bits.** Audited in full on 2026-07-27 alongside the Go port;
+  every item, what it actually does when you use it, and whether it's worth fixing is in
+  [doc/HTTPRULE_GAPS.md](HTTPRULE_GAPS.md), with a test pinning each. The list is
+  **identical in both server implementations** by construction, so this is one item, not
+  two. Ranked by consequence:
+  - `response_body` is **silently ignored** — the whole response message comes back
+    instead of the named field. The only gap that returns a *wrong answer*; everything
+    else fails closed. Fix this one first.
+  - `HttpRule.selector` / service-config rule lists — bindings are read only from the
+    method option, so a service-config `rules:` block is invisible.
+  - Bare `*`/`**` segments, and multi-segment patterns (`{name=shelves/*/books/*}`) —
+    the latter compiles to all-literal segments, i.e. a **dead route**, silently.
+  - Non-scalar query binding — rules out `Timestamp`/`Duration`/`FieldMask`/wrapper
+    types in the URL.
+  - `body:` naming a scalar, repeated, or dotted field.
+  - Proto field names only, never their JSON (camelCase) spelling. Cheapest to add.
+
+  *(The 2026-07-27 audit also **fixed** one thing it found rather than filing it: a
+  trailing custom verb (`:cancel`) was stripped from the template instead of matched, so
+  it answered the bare resource URL, leaked into the captured variable, and collided with
+  every other verb on that resource. That was mis-routing, not a missing feature.)*
 - [x] ~~REST transcoding in the proxy (2026-07-05).~~ Done on both Fetch and WebSocket;
   see the proxy section above for details and the reflection option-preservation caveat.
 - [ ] **Client-side REST helper** — the generated TS client still calls the gRPC-style
@@ -225,13 +244,20 @@ needing verification.
   proxy's transcoder (bundle or reflection snapshot). Both modes share one `Runtime`, so
   there is nothing proxy-specific left here. (This entry predated that work and
   contradicted the proxy section above; closed in the 2026-07-27 sweep.)
-- [ ] **REST transcoding in the Go server** — the only spec surface `go/webnext` does not
-  serve (the `+json` *codec* is fully supported on both surfaces there; only the annotated
-  `/v1/…` aliases and their WebSocket form are missing). It needs a Go port of
-  `httprule.rs` — path templates, `additional_bindings`, body/query binding. Worth pairing
-  with REST conformance cases, which don't exist yet either (`conformance/README.md`
-  "Not yet covered"), so the two implementations are held to one contract from the start
-  rather than diverging first. See `doc/GO_SERVER.md`.
+- [x] ~~**REST transcoding in the Go server.**~~ **Done (2026-07-27.)** `go/webnext/httprule.go`
+  is a structurally parallel port of `httprule.rs`, wired into both surfaces: Fetch tries a
+  REST binding before the main method path (and before the implicit-codec gate, since
+  annotated endpoints accept plain HTTP unconditionally), and an annotation-matching WS
+  upgrade becomes a text-locked single-stream JSON route. `go/webnext` now serves **every**
+  spec surface. See `doc/GO_SERVER.md`.
+- [ ] **REST conformance cases.** The pairing this was meant to have: two implementations
+  now serve REST and nothing cross-checks them. Two blockers, both real — `conformance.proto`
+  carries no annotations (adding them makes every implementation vendor `google/api/*.proto`),
+  and a REST case is a raw `(verb, URL, body)` rather than an RPC, which the TS driver has
+  no helper for (that helper is the "Client-side REST helper" item above — the two want
+  doing together). The stopgap in place meanwhile: both servers' REST tests drive the same
+  `echo.proto` annotations through the same URLs, each Go test naming its Rust counterpart.
+  Agreement by construction, not by harness; recorded as such in `conformance/README.md`.
 
 ## WebSocket streams / multiplexing
 

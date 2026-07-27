@@ -157,7 +157,7 @@ UPSTREAM=http://localhost:50051 LISTEN=127.0.0.1:8080 cargo run -p grpc-webnext-
 | Rust server + proxy&nbsp;·&nbsp;[crates.io](https://crates.io/crates/grpc-webnext) | [`rust/crates/grpc-webnext`](rust/crates/grpc-webnext) | ✅ h2ts, custom `Frame`, `+json`, REST, deadlines, cancel, size limits, native same-port |
 | TypeScript client (browser + Node)&nbsp;·&nbsp;[npm](https://www.npmjs.com/package/@grpc-webnext/client) | [`node/packages/client`](node/packages/client) | ✅ h2ts + Fetch + WebSocket, typed codegen, callback + promise APIs |
 | Conformance suite | [`conformance/`](conformance/) | ✅ language-neutral cases × Rust **and** Go servers × TS driver, run over the real wire |
-| Go in-process server | [`go/webnext`](go/webnext) | ✅ h2ts, custom `Frame`, `+json`, deadlines, cancel, size limits, native same-port (no REST) |
+| Go in-process server | [`go/webnext`](go/webnext) | ✅ h2ts, custom `Frame`, `+json`, REST, deadlines, cancel, size limits, native same-port |
 | Node in-process server | [`node/packages/server`](node/packages/server) | ⬜ skeleton |
 | Rust client (WASM / frontend) | `rust/crates/grpc-webnext-client` | ⬜ planned |
 

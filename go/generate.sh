@@ -12,6 +12,8 @@
 #   go/webnext/pb          <- /proto/grpc_webnext.proto            (the wire envelope)
 #   go/internal/conformance/conformancepb
 #                          <- /conformance/proto/conformance.proto (the test service)
+#   go/internal/testecho/testechopb
+#                          <- /rust/crates/testecho/proto/echo.proto  (REST fixtures)
 #   go/examples/greeter/greeterpb
 #                          <- /rust/examples/greeter.proto         (the demo service)
 #
@@ -42,6 +44,22 @@ protoc \
   --go-grpc_opt=Mconformance.proto="$mod/internal/conformance/conformancepb" \
   "$root/conformance/proto/conformance.proto"
 
+# --- the Echo test service (google.api.http fixtures, shared with Rust) -----
+#
+# The SAME proto the Rust crate's REST tests use, so both implementations are
+# held to one set of annotations rather than each inventing its own. Its
+# `google/api` imports are the vendored subset next to it; only echo.proto is
+# passed to protoc, so the annotations bindings come from genproto (their
+# `go_package` already points there) rather than being regenerated here.
+rm -f internal/testecho/testechopb/*.pb.go
+protoc \
+  -I "$root/rust/crates/testecho/proto" \
+  --go_out=. --go_opt=module="$mod" \
+  --go_opt=Mecho.proto="$mod/internal/testecho/testechopb" \
+  --go-grpc_out=. --go-grpc_opt=module="$mod" \
+  --go-grpc_opt=Mecho.proto="$mod/internal/testecho/testechopb" \
+  "$root/rust/crates/testecho/proto/echo.proto"
+
 # --- the greeter demo service (shared with the Rust and TS examples) --------
 rm -f examples/greeter/greeterpb/*.pb.go
 protoc \
@@ -52,5 +70,5 @@ protoc \
   --go-grpc_opt=Mgreeter.proto="$mod/examples/greeter/greeterpb" \
   "$root/rust/examples/greeter.proto"
 
-gofmt -w webnext/pb internal/conformance/conformancepb examples/greeter/greeterpb
-echo "generated: webnext/pb, internal/conformance/conformancepb, examples/greeter/greeterpb"
+gofmt -w webnext/pb internal/conformance/conformancepb internal/testecho/testechopb examples/greeter/greeterpb
+echo "generated: webnext/pb, internal/conformance/conformancepb, internal/testecho/testechopb, examples/greeter/greeterpb"

@@ -37,6 +37,8 @@
 //     trailers) or, for JSON, a bare body with the status in headers.
 //   - `grpc-webnext+proto` / `+json` WebSocket subprotocols — streaming over the
 //     custom `Frame` protocol, one stream per socket.
+//   - `google.api.http` annotation URLs (`/v1/…`) — REST aliases for annotated
+//     methods, JSON-only, over Fetch or (for streaming methods) a WebSocket.
 //
 // # Differences from the Rust implementation
 //
@@ -48,7 +50,7 @@
 // (its `Backend` enum) collapses to nothing here, because a gRPC server in Go
 // already *is* an http.Handler.
 //
-// REST transcoding of `google.api.http` annotations is likewise Rust-only for
-// now. The `+json` codec — both surfaces — is fully supported here; only the
-// annotated `/v1/…` REST routes are not. See ../README.md for the current matrix.
+// Every *spec surface* is served here, proxy mode aside. The HttpRule subset does
+// have gaps, but they are shared with the Rust router rather than Go-specific —
+// see ../../doc/HTTPRULE_GAPS.md, and ../README.md for the current matrix.
 package webnext

@@ -73,10 +73,17 @@ func startServerWithoutTranscoder(t *testing.T, cfg webnext.ServerConfig) *testS
 }
 
 func serve(t *testing.T, cfg webnext.ServerConfig) *testServer {
+	return serveBackend(t, cfg, conformance.Register)
+}
+
+// serveBackend is the same harness over an arbitrary gRPC service — the REST
+// tests drive the Echo service instead, since that is where the shared
+// `google.api.http` annotations live.
+func serveBackend(t *testing.T, cfg webnext.ServerConfig, register func(grpc.ServiceRegistrar)) *testServer {
 	t.Helper()
 
 	grpcServer := grpc.NewServer()
-	conformance.Register(grpcServer)
+	register(grpcServer)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
