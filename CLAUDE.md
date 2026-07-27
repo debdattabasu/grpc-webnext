@@ -10,7 +10,7 @@ native in-process servers per language, plus a schema-agnostic proxy.
 proto/          wire envelope (Frame, Metadatum, …) — shared source of truth
 spec/           PROTOCOL.md (normative) + COMPATIBILITY.md
 conformance/    language-neutral conformance suite (proto, cases, contract)
-doc/            design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION)
+doc/            design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO_SERVER)
 rust/           Cargo workspace  ← NOTE: the workspace is here, NOT the repo root
   crates/grpc-webnext/   server library + proxy binary (grpc-webnext-proxy)
   crates/testecho/       test-only Echo service
@@ -20,24 +20,29 @@ node/           npm workspace
   packages/client/       @grpc-webnext/client (Fetch + WebSocket)  ✅
   packages/server/       @grpc-webnext/server (in-process)  ⬜ skeleton
 go/             Go module github.com/grpc-webnext/grpc-webnext/go
-  webnext/               in-process server  ⬜ skeleton
+  webnext/               in-process server (Fetch + WS + h2ts + native)  ✅ (no REST)
+  internal/conformance/  ConformanceService impl, shared by the binary and the tests
+  examples/              greeter, conformance-server
 ```
 
 ## Build & test
 
 ```bash
 # Rust (server + proxy live in one crate). Run from rust/.
-cd rust && cargo test --workspace          # 90 tests
+cd rust && cargo test --workspace          # 83 tests
 cd rust && cargo clippy --workspace --all-targets   # keep clean
 
 # TypeScript. Install from the npm workspace root (node/), NOT from a package — npm
 # resolves a member install to the root anyway, so node/package-lock.json is the one
-# lockfile that governs the tree. The e2e/json/promise/conformance tests spawn the Rust
-# example servers (cargo run in ../rust), so a Rust toolchain is needed for the full suite.
-cd node && npm ci && npm test               # 89 tests (client; server is build-only)
+# lockfile that governs the tree. The e2e/json/promise/h2ts tests spawn the Rust example
+# servers, and the conformance matrix builds and spawns BOTH the Rust and Go conformance
+# servers — so the full suite needs a Rust and a Go toolchain.
+cd node && npm ci && npm test               # 138 tests (client; server is build-only)
 
-# Go skeleton (stdlib-only; builds + vets clean).
-cd go && go build ./... && go vet ./...
+# Go. The WS path has a reader, a writer, and a keepalive ticker on one connection,
+# so -race earns its runtime.
+cd go && go build ./... && go vet ./... && go test -race ./...
+cd go && ./generate.sh                     # regenerate the checked-in protobuf bindings
 ```
 
 Servers signal readiness by printing `LISTENING http://<addr>` on stdout — the
@@ -46,7 +51,8 @@ harness (and conformance runner) parse that line.
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs those same three ecosystems as
 parallel jobs on every push/PR — clippy `-D warnings` + `cargo test` + `cargo package` (which
 exercises the crates.io vendored-proto fallback), the TS build + full vitest suite (e2e and the
-conformance matrix, so it needs Rust too), and Go fmt/build/vet/test. It also fails if the
+conformance matrix, so it needs **both** a Rust and a Go toolchain — the matrix builds and
+spawns both server implementations), and Go fmt/build/vet/`test -race`/`mod tidy`. It also fails if the
 vendored proto mirror was committed stale — `build.rs` refreshes it during the build, so the
 `vendored_proto` test can't catch that; only a dirty tree afterwards can. `cargo fmt --check` is
 deliberately **not** a gate: the tree is hand-formatted and ~230 files differ from rustfmt
@@ -79,7 +85,10 @@ see [doc/H2TS_INTEGRATION.md](doc/H2TS_INTEGRATION.md)):
 
 The in-process server (wrap a tonic `Routes`) and the standalone proxy (front any gRPC
 upstream) share one code path via a two-variant `Backend` enum
-(`InProcess(Routes)` | `Upstream(Channel)`).
+(`InProcess(Routes)` | `Upstream(Channel)`). The **Go** server implements the same surfaces
+in-process only, and needs no such enum — a `*grpc.Server` already *is* an `http.Handler`, so
+its backend is that interface and dispatch is an in-process HTTP round trip
+(`go/webnext/dispatch.go`). See [doc/GO_SERVER.md](doc/GO_SERVER.md).
 
 ## Audit process
 
@@ -120,7 +129,9 @@ hides.
 - `proto/grpc_webnext.proto` at the repo root is the shared contract and the **only** place
   to edit it; each language generates its own bindings (prost, ts-proto, protoc-gen-go).
   Node and Go *check in* their generated code (the proto is a dev-time codegen input), so their
-  packages never ship the `.proto`. Rust generates at **build time** (prost `build.rs` → `OUT_DIR`),
+  packages never ship the `.proto`. Go regenerates with `go/generate.sh`, which passes each
+  proto's Go import path as a protoc `M<file>=<path>` flag rather than adding a `go_package`
+  option — the shared contract stays language-neutral. Rust generates at **build time** (prost `build.rs` → `OUT_DIR`),
   so the published crate must physically carry the proto — it keeps a **vendored mirror** at
   `rust/crates/grpc-webnext/proto/grpc_webnext.proto`. That copy is a generated artifact, not
   hand-maintained: `build.rs` refreshes it from the root proto on every in-workspace build (and
@@ -128,7 +139,13 @@ hides.
   crates.io build). The `vendored_proto` test backstops them against drift. Bottom line: edit
   `/proto`, run a Rust build, commit the refreshed mirror alongside.
 - `spec/PROTOCOL.md` is normative; `conformance/` is the cross-language anti-drift guard
-  (run every server impl × every client driver over the real wire).
+  (run every server impl × every client driver over the real wire). It runs each case
+  against the Rust **and** Go servers; a new impl is one entry in the `SERVERS` table in
+  `node/packages/client/test/conformance.test.ts`.
+- A conformance case whose `transports:` lists `websocket` only actually exercises the
+  WebSocket if the RPC is a **streaming** one — a unary call takes the Fetch path under
+  every transport profile. That blind spot hid a real bug for a while; see
+  `conformance/README.md`.
 - gRPC status codes are canonical; WS pre-RPC rejection uses close code `4000 + code`.
 - macOS BSD `sed` has no `\b` word boundaries — don't use them in scripts here.
 

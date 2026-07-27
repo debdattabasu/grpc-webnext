@@ -91,11 +91,12 @@ grammar. Current coverage:
 | unary | [cases/unary.yaml](cases/unary.yaml) | OK, empty payload, non-OK status + trailing metadata, response headers |
 | streaming | [cases/streaming.yaml](cases/streaming.yaml) | server-stream (incl. messages-then-error), client-stream aggregate, bidi echo, client cancel → CANCELLED |
 | deadline | [cases/deadline.yaml](cases/deadline.yaml) | unary + stream `grpc-timeout` expiry (DEADLINE_EXCEEDED); within-deadline passes |
-| limits | [cases/limits.yaml](cases/limits.yaml) | oversize request rejected on every path, large response intact, `+json` w/o transcoder → UNIMPLEMENTED, ASCII+`-bin` metadata round-trip |
+| limits | [cases/limits.yaml](cases/limits.yaml) | oversize request rejected on every path, large response intact, `+json` w/o transcoder → UNIMPLEMENTED, ASCII+`-bin` metadata round-trip on **both** Fetch and WebSocket |
 
-Each case runs under every applicable **transport profile**: `proto/h2ts` (real gRPC over
+Each case runs under every applicable **transport profile** — `proto/h2ts` (real gRPC over
 the h2ts tunnel), `proto/ws` (the custom `Frame` path, unary over Fetch), and `json` (the
-custom path, Fetch + WS). 45 case×profile runs, all green.
+custom path, Fetch + WS) — against **every server implementation**. 47 case×profile runs per
+server, Rust and Go, all green.
 
 **Design notes** (surfaced by the run — behavior pinned, not gaps):
 - **Size limits are request-only, by design.** `max_message_bytes` bounds inbound *request*
@@ -112,6 +113,16 @@ The first run also **found two real bugs, now fixed**: trailing metadata on a tr
 trailing metadata only from a trailers block, but a trailers-only response carries it in the
 headers block).
 
+Adding the **Go** server (2026-07-27) found two more, both in Rust — see
+[`/doc/GO_SERVER.md`](../doc/GO_SERVER.md). One of them is a lesson about this suite's own
+blind spots: `metadata-roundtrip` is a **unary** case, and a unary call takes the **Fetch**
+path under *every* transport profile — even `proto/ws`, where only streaming uses the
+WebSocket. So the WebSocket frame-metadata conversion was never executed by the matrix, and
+`-bin` metadata was silently dropped there on Rust. The fix was a *streaming* twin of the
+case (`metadata-roundtrip-websocket`). **When a case's `transports:` includes `websocket`,
+check that the RPC is actually a streaming one** — otherwise the WebSocket surface goes
+unproven.
+
 **Not yet covered** (tracked, not silently omitted): WebSocket keepalive/idle-timeout,
 connection-level auth (Subscribe rejection), REST/HttpRule transcoding routes, half-close
 ordering edge cases. Add these as new suites; extend the table when you do.
@@ -120,19 +131,26 @@ ordering edge cases. Add these as new suites; extend the table when you do.
 
 The harness is the TypeScript driver in
 [`node/packages/client/test/conformance.test.ts`](../node/packages/client/test/conformance.test.ts):
-it loads `cases/*.yaml`, spawns the Rust `conformance-server`
-([`rust/examples/conformance-server`](../rust/examples/conformance-server)) once per required
-config profile, and drives each case across every transport profile via the TS client,
-asserting the observed wire behavior.
+it loads `cases/*.yaml`, builds and spawns each server implementation once per required
+config profile, and drives every case across every transport profile via the TS client,
+asserting the observed wire behavior. The server table (`SERVERS`) currently holds:
+
+| Impl | Entry point | Toolchain needed |
+|---|---|---|
+| `rust` | [`rust/examples/conformance-server`](../rust/examples/conformance-server) | cargo |
+| `go` | [`go/examples/conformance-server`](../go/examples/conformance-server) | go |
+
+Each is built up front and then spawned **directly** (not through `cargo run`/`go run`), so
+killing the process actually kills the server instead of orphaning a grandchild.
 
 ```bash
 cd node/packages/client && npm test                              # the full suite (incl. conformance)
 cd node/packages/client && npx vitest run test/conformance.test.ts   # just the matrix
 ```
 
-The Rust server is thin: it implements `ConformanceService` on the grpc-webnext in-process
-server (modeled on `rust/examples/greeter-server`). A second server impl (Go, Node) plugs in
-the same way (below) and the driver gains it as another target.
+Each server is thin: it implements `ConformanceService` on that language's grpc-webnext
+in-process server. A further impl (Node) plugs in the same way (below) and the driver gains
+it as another target by appending one entry to `SERVERS`.
 
 ## Adding an implementation
 

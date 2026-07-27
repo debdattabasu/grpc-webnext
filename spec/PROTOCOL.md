@@ -354,8 +354,22 @@ With `None` (or, in-process, no `transcoder`), `+json`/REST return `UNIMPLEMENTE
 proper status-in-header (Fetch) / `Reset` frame (WS) — never an HTTP 501, on either mode
 (see "Limits & error surfaces").
 
-## Reserved for later (not in v1)
+## Fragmentation: why this protocol doesn't have it
 
-Fragmentation of a single message across frames (for very large messages) is intentionally
-out of scope. It would be added as a new `Frame` kind (e.g. `fragment`) so existing frames
-are unaffected. Not built until there's demand.
+Splitting one large message across frames is **intentionally out of scope**, and not merely
+deferred: on the binary default the problem is already solved a layer down. That path is real
+HTTP/2 over h2ts, where a large gRPC message is carried in bounded, flow-controlled **DATA
+frames** (`SETTINGS_MAX_FRAME_SIZE`, 16 KiB default) and the tunnel forwards them
+**sub-frame** — h2ts never holds a whole WebSocket frame in memory. The transport therefore
+never materializes the message; only the gRPC codec does, at the message boundary, exactly as
+native gRPC does. A `fragment` frame kind here would be a worse reimplementation of that.
+
+On the custom `Frame` path the rule stands: **one message per frame, no fragmentation**, in
+both codecs. A very large message is one very large WebSocket message, materialized at both
+ends and bounded by `max_message_bytes`. That is the trade the path exists to make — atomic
+messages keep the DevTools Network → Messages panel readable and the protocol trivial to
+implement — and the JSON codec could not stream incrementally anyway, since it transcodes
+whole messages. **If you need very large messages, use the default (h2ts) path.**
+
+Should this ever change, it would be additive: a new `Frame` kind (e.g. `fragment`), leaving
+existing frames untouched. Not built.

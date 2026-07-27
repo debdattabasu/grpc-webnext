@@ -71,7 +71,7 @@ for await (const msg of rpc.chat(source, { signal })) …     // bidi, cancel vi
         ▼                            (Fetch unary · WebSocket streams)
    ┌───────────────────────────────────────────────────────────┐
    │  grpc-webnext endpoint — one port                          │
-   │    in-process server:  Rust ✅ · Go ⬜ · Node ⬜             │
+   │    in-process server:  Rust ✅ · Go ✅ · Node ⬜             │
    │    or standalone proxy (Rust) — front any gRPC upstream    │
    └───────────────────────────────────────────────────────────┘
         │   native application/grpc (same port, byte-for-byte passthrough)
@@ -156,13 +156,14 @@ UPSTREAM=http://localhost:50051 LISTEN=127.0.0.1:8080 cargo run -p grpc-webnext-
 | Wire protocol + normative spec | [`proto/`](proto/) · [`spec/PROTOCOL.md`](spec/PROTOCOL.md) | ✅ the contract |
 | Rust server + proxy&nbsp;·&nbsp;[crates.io](https://crates.io/crates/grpc-webnext) | [`rust/crates/grpc-webnext`](rust/crates/grpc-webnext) | ✅ h2ts, custom `Frame`, `+json`, REST, deadlines, cancel, size limits, native same-port |
 | TypeScript client (browser + Node)&nbsp;·&nbsp;[npm](https://www.npmjs.com/package/@grpc-webnext/client) | [`node/packages/client`](node/packages/client) | ✅ h2ts + Fetch + WebSocket, typed codegen, callback + promise APIs |
-| Conformance suite | [`conformance/`](conformance/) | ✅ language-neutral cases + Rust server + TS driver, run over the real wire |
-| Go in-process server | [`go/webnext`](go/webnext) | ⬜ skeleton (API + router; protocol stubbed) |
+| Conformance suite | [`conformance/`](conformance/) | ✅ language-neutral cases × Rust **and** Go servers × TS driver, run over the real wire |
+| Go in-process server | [`go/webnext`](go/webnext) | ✅ h2ts, custom `Frame`, `+json`, deadlines, cancel, size limits, native same-port (no REST) |
 | Node in-process server | [`node/packages/server`](node/packages/server) | ⬜ skeleton |
 | Rust client (WASM / frontend) | `rust/crates/grpc-webnext-client` | ⬜ planned |
 
-> **Pre-1.0.** The Rust server/proxy and TypeScript client are feature-complete and covered by
-> the conformance suite; the polyglot servers are the next milestone. See
+> **Pre-1.0.** The Rust server/proxy, the Go server, and the TypeScript client are covered by
+> the conformance suite, which runs every case against both server implementations; the Node
+> server is the remaining polyglot milestone. See
 > [`doc/BACKLOG.md`](doc/BACKLOG.md) — including a plan to terminate grpc-webnext *inside stock
 > Envoy* via a Rust dynamic-module filter, no sidecar.
 
@@ -175,7 +176,7 @@ contract at the root.
 proto/                 wire envelope (Frame, Metadatum, …) — source of truth
 spec/                  PROTOCOL.md (normative) + COMPATIBILITY.md
 conformance/           language-neutral conformance suite (proto, cases, driver)
-doc/                   design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION)
+doc/                   design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO_SERVER)
 
 rust/                  Cargo workspace
   crates/grpc-webnext/   server library + proxy binary (grpc-webnext-proxy)
@@ -186,20 +187,22 @@ node/                  npm workspace
   packages/server/       @grpc-webnext/server — in-process (skeleton)
 
 go/                    Go module (github.com/grpc-webnext/grpc-webnext/go)
-  webnext/               in-process server (skeleton)
+  webnext/               in-process server — Fetch + WebSocket + h2ts + native gRPC
+  examples/              Greeter service, conformance server
 ```
 
 ## Development
 
 ```bash
-cd rust && cargo test --workspace         # Rust: server + proxy + conformance
+cd rust && cargo test --workspace          # Rust: server + proxy
 cd rust && cargo clippy --workspace --all-targets
-cd node/packages/client && npm test       # TypeScript: codec, e2e, conformance (spawns Rust servers)
-cd go && go build ./... && go vet ./...    # Go: skeleton builds clean
+cd go   && go test -race ./...             # Go: wire unit tests + end-to-end over real sockets
+cd node && npm ci && npm test              # TypeScript: codec, e2e, and the conformance matrix
 ```
 
-A Rust toolchain is needed for the full TypeScript suite — the e2e and conformance tests spawn
-the Rust example servers. Servers print `LISTENING http://<addr>` when ready.
+The conformance matrix runs every case against **both** server implementations, so the
+TypeScript suite needs a Rust *and* a Go toolchain — it builds and spawns both servers.
+Servers print `LISTENING http://<addr>` when ready.
 
 ## License
 

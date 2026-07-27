@@ -1,5 +1,11 @@
 # Protocol conformance status
 
+> **Note (2026-07-27):** the **Go** in-process server is implemented and joined the
+> conformance matrix, which now runs every case against both server implementations.
+> Writing the second implementation surfaced two real Rust bugs — `-bin` metadata dropped
+> on the WebSocket path, and a size-limit `Reset` that left the socket open — both fixed,
+> both now pinned by tests. See `doc/GO_SERVER.md`.
+
 > **Note (2026-07-05):** the `grpc-webnext-core`, `-server`, `-proxy`, and `-transport`
 > crates were unified into a single `grpc-webnext` crate (library + proxy binary) — see
 > `doc/UNIFICATION.md`. Dated entries below cite the pre-unification paths

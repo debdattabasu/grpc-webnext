@@ -3,35 +3,66 @@
 Tracked items intentionally not done yet, so they aren't forgotten. Nothing here
 blocks the current milestone; each is a follow-up pass.
 
+> **Swept 2026-07-27.** Several items had been overtaken by the h2ts pivot (which retired
+> multiplexing and the WS pool) and by the `+json`/transcoding work, and two contradicted
+> `[x]` entries elsewhere in this same file. Each is now closed with the evidence that
+> closes it rather than left as a standing TODO. What remains genuinely open: graceful
+> shutdown, the Envoy filters, the HttpRule tail (plus Go REST), TS client retry/reconnect
+> and consumer backpressure, and one vestigial proto field.
+>
+> A pattern worth naming: **three separate items — backpressure, large-payload streaming, and
+> fragmentation — all closed with the same answer.** Each was a bespoke solution to a problem
+> HTTP/2 already solves, and each dissolved when the binary default moved to real H2 over
+> h2ts. Before adding transport machinery to the custom `Frame` path, check whether the
+> default path already has it.
+
 ## Proxy — full gRPC semantics (README point 8)
 
-The proxy round-trips unary (Fetch) and streaming (WebSocket) end-to-end, but these
-connection/semantics details are still stubbed:
+The proxy round-trips unary (Fetch) and streaming (WebSocket) end-to-end. As of the
+2026-07-27 sweep **nothing here is open** — the section is kept as the decision record for
+how each item was resolved (or deliberately dropped):
 
 - [x] ~~Client cancellation → upstream.~~ Verified: a `Reset` frame (or full WebSocket
   disconnect) aborts the response task, which drops the tonic `Streaming` and sends
   RST_STREAM upstream. Covered by `proxy/tests/cancel.rs` (Reset + disconnect) and
   `server/tests/cancel.rs` (in-process handler drop).
-- [ ] **Backpressure / flow control.** WS request path uses a fixed-size bounded
-  channel; no credit-based per-stream flow control (acceptable per design — atomic
-  messages — but revisit if large messages starve a multiplexed connection).
-- [ ] **Trailing vs initial metadata fidelity (unary).** Fetch unary currently emits
-  response metadata as HTTP headers and only status in the trailer block; trailing
-  metadata from a unary call is not separated out.
+- [x] ~~**Backpressure / flow control.**~~ **Resolved by the single-stream + h2ts pivot
+  (2026-07-27 sweep).** The open question was credit-based per-stream flow control, and it
+  was scoped by its own caveat: *"revisit if large messages starve a multiplexed
+  connection"*. There is no longer a multiplexed custom-`Frame` connection to starve — one
+  WebSocket carries exactly one stream. Where multiplexing does exist it is **real HTTP/2
+  over h2ts**, so per-stream flow control is the genuine article (`WINDOW_UPDATE`,
+  end-to-end between the browser's H2 stack and tonic/grpc-go), not something this layer
+  should reimplement. What the custom path does have is a bounded chain that propagates to
+  TCP: request `mpsc::channel(16)` and outbound `mpsc::channel(64)`, both with awaited
+  sends (`src/ws.rs`); the Go server mirrors it with `chan []byte, 16` / `chan wsOutbound,
+  64` plus an unbuffered `io.Pipe` into grpc-go, so a slow service blocks the socket read
+  rather than accumulating. Same reasoning that closed "stream large WS message payloads
+  without buffering" under Protocol. **Still open on the *client*** — see the TypeScript
+  section.
+- [x] ~~**Trailing vs initial metadata fidelity (unary).**~~ **Done.** Fetch unary now
+  separates the two: initial metadata goes out as HTTP response headers, trailing metadata
+  into the `Trailer` block alongside the status — including the trailers-only case, where
+  the metadata rides in the upstream's headers block and is routed to the trailer
+  (`fetch.rs`, `unary_proto`). Pinned by the conformance case `error-with-trailers`, which
+  asserts a non-OK status *and* its trailing metadata on every transport and both server
+  implementations.
 - [x] ~~Retry (unary) — REMOVED (2026-07-04).~~ A `RetryPolicy` was briefly on the
   proxy, then removed on principle: retry belongs in the **client** (gRPC service
   config). A protocol-level wire proxy fans many clients into one upstream, so
   proxy-side retry amplifies load exactly when the upstream is failing (retry storms)
   and compounds with client retries. Removing it also unblocked response streaming
   (retry forced buffering to replay the request / peek the status). Not planned.
-- [x] ~~Max-concurrent-streams cap per WS.~~ `max_concurrent_streams` rejects excess
-  `Subscribe`s with RESOURCE_EXHAUSTED. Covered by `proxy/tests/cancel.rs`.
+- [x] ~~Max-concurrent-streams cap per WS.~~ Built as a `max_concurrent_streams` knob,
+  then **removed with multiplexing**: a WebSocket now carries exactly one stream, so the
+  cap is 1 by construction and a second `Subscribe` is answered
+  `Reset{INVALID_ARGUMENT, "stream already open"}`. Concurrency limits for the h2ts path
+  are HTTP/2's `SETTINGS_MAX_CONCURRENT_STREAMS`, set on the H2 server.
 - [x] ~~Deadline enforcement proxy-side.~~ The proxy now drops the call at the
   deadline (DEADLINE_EXCEEDED) on both unary and streaming, and forwards
   `grpc-timeout` downstream with a grace backstop. Covered by `proxy/tests/deadline.rs`.
 - [x] ~~Same-port native gRPC coexistence.~~ `application/grpc` is forwarded to the
   upstream untouched (README #9). Covered by `proxy/tests/passthrough.rs`.
-- [x] ~~Client cancellation → upstream.~~ (see below)
 - [x] ~~`+json` termination (2026-07-05).~~ The proxy transcodes `+json` to/from the
   upstream's binary protobuf on both Fetch and WebSocket, reusing the core `Transcoder`
   (identical output to the native server). Descriptors come from **upstream reflection**
@@ -59,19 +90,30 @@ connection/semantics details are still stubbed:
 
 ## Native server library
 
-Serves native gRPC pass-through + grpc-webnext unary + streaming on one port,
-backed by a tonic `Routes`. Deferred:
+Serves native gRPC pass-through + grpc-webnext unary + streaming on one port, backed by a
+tonic `Routes` (Rust) or a `*grpc.Server` (Go). Deferred:
 
-- [ ] **`+json` is binary-only (UNIMPLEMENTED).** Same reason as the proxy: the
-  inner tonic router speaks binary protobuf, so JSON needs either a JSON-capable
-  codec registered on the services or descriptor-based transcoding.
-- [ ] **Graceful shutdown / drain** is not wired (serve loop runs until dropped).
-- [ ] **Per-WS max-concurrent-streams cap** and idle cleanup.
-- [ ] **Unary buffers the whole response** before framing (fine for unary; matches
-  the Fetch contract).
+- [x] ~~**`+json` is binary-only (UNIMPLEMENTED).**~~ **Done** — descriptor-based
+  transcoding via `ServerConfig::transcoder`, which is what the Codec section below
+  already recorded. (This entry contradicted it; closed in the 2026-07-27 sweep.)
+- [ ] **Graceful shutdown / drain** is not wired, in Rust *or* Go: the accept loop runs
+  until the task is dropped (`serve_in_process`), and the Go side hands a listener to
+  `http.Server.Serve` with no `Shutdown` path exposed. Wanted: stop accepting, let
+  in-flight RPCs finish, `GOAWAY`/close idle WebSockets, bounded by a drain deadline.
+- [x] ~~**Per-WS max-concurrent-streams cap** and idle cleanup.~~ **Moot** — a WebSocket
+  carries exactly one stream, so the cap is 1 by construction (a second `Subscribe` is
+  answered `Reset{INVALID_ARGUMENT, "stream already open"}`). Idle cleanup is covered by
+  the two mechanisms that replaced it: server-driven keepalive drops a dead peer
+  (`ws_keepalive` + `ws_keepalive_timeout`), and single-stream teardown closes the socket
+  as soon as its one stream reaches a terminal frame.
+- [x] ~~**Unary buffers the whole response** before framing.~~ **Done** — the `+proto`
+  Fetch response is streamed, not buffered: the status rides in the trailer block *after*
+  the message, so the inner gRPC frame is piped to the socket (minus its compression-flag
+  byte) and the trailer block appended at the end (`fetch.rs` `async_stream` + `StreamBody`;
+  Go: `fetch.go` chunked copy + flush). A large blob is never malloc'd. `+json` still
+  buffers by necessity — the transcode is whole-message and the status must precede the body.
 - Note: deadlines *are* enforced here (grpc-timeout is forwarded and the inner
-  tonic server honors it), and client cancellation drops the inner call future —
-  both stronger than the proxy today.
+  tonic server honors it), and client cancellation drops the inner call future.
 
 ## Auth
 
@@ -170,25 +212,35 @@ needing verification.
   ignored). `body:"*"` routes take each frame as a request message; body-less (GET) routes
   build the single request from the URL and stream responses. Covered by
   `server/tests/json.rs` (`ws_annotation_*`).
-- [ ] **WS annotation routing in the proxy** — like `+json`/transcoding generally, the
-  proxy is schema-agnostic and doesn't do it; the native library does.
+- [x] ~~**WS annotation routing in the proxy**~~ — **Done (2026-07-05)**, at the same time
+  as the rest of proxy REST routing: `match_ws` resolves the upgrade URL against the
+  proxy's transcoder (bundle or reflection snapshot). Both modes share one `Runtime`, so
+  there is nothing proxy-specific left here. (This entry predated that work and
+  contradicted the proxy section above; closed in the 2026-07-27 sweep.)
+- [ ] **REST transcoding in the Go server** — the only spec surface `go/webnext` does not
+  serve (the `+json` *codec* is fully supported on both surfaces there; only the annotated
+  `/v1/…` aliases and their WebSocket form are missing). It needs a Go port of
+  `httprule.rs` — path templates, `additional_bindings`, body/query binding. Worth pairing
+  with REST conformance cases, which don't exist yet either (`conformance/README.md`
+  "Not yet covered"), so the two implementations are held to one contract from the start
+  rather than diverging first. See `doc/GO_SERVER.md`.
 
 ## WebSocket streams / multiplexing
 
-- [x] ~~Multiplexing off by default; human-readable single-stream JSON.~~ Default is
-  **one WebSocket per stream**, connected to the method's URL — JSON frames carry no
-  `streamId` and no `method` (both implied by the route), and the first inbound frame
-  opens the stream. Multiplexing is opt-in via a `+multi` subprotocol
-  (`grpc-webnext+{json,proto}+multi`) and the client `multiplex`/`poolSize` options;
-  `+multi` frames carry `streamId` (+ `method` on the JSON open). Server, proxy, and
-  TS client all implement both; covered by `server/tests/json.rs`
-  (`streaming_json_round_trip`, `ws_multiplex_two_streams`), `proxy/tests/*`, and the
-  TS e2e (`multiplex: two concurrent streams`).
+- [x] ~~Multiplexing off by default; human-readable single-stream JSON.~~ Superseded by
+  the h2ts pivot: the custom `Frame` path is **always one WebSocket per stream**, connected
+  to the method's URL — frames carry no `streamId` and no `method` (both implied by the
+  route), and the first inbound frame opens the stream. The opt-in `+multi` subprotocol and
+  the client's `multiplex`/`poolSize` options were **deleted outright**, along with
+  `stream_id` (the proto field is removed, not reserved). Multiplexing, when you want it,
+  is real HTTP/2 over h2ts. Verified gone: no `stream_id` / `streamId` / `poolSize` /
+  `+multi` / `max_concurrent_streams` anywhere in the tree.
 - [x] ~~WebSocket handshake auth gate (method-scoped).~~ **Removed** with `connect_auth`
   (above) — auth is per-RPC at the router on every transport, with no WS-handshake gate.
   (This item also predated single-stream; the `?method=` multiplex variant is gone too.)
   (`connect_gate_*`, `multiplex_auth_*`, `no_credential_opens_the_connection`).
-- [ ] **WS pool never reaps idle connections** (multiplex mode).
+- [x] ~~**WS pool never reaps idle connections** (multiplex mode).~~ **Moot** — there is
+  no pool. One WebSocket per stream, closed as soon as that stream terminates.
 
 ## Protocol
 
@@ -196,10 +248,24 @@ needing verification.
   (`ServerConfig::ws_keepalive` / `ProxyConfig::ws_keepalive`), with gRPC-style
   pong-timeout drop (`ws_keepalive_timeout`). The old app-level `Ping`/`Pong` frame
   kinds were removed (field numbers reserved). See `doc/STATUS.md`.
-- [ ] **Fragmentation** (README point 11 "another day"): large-message fragmentation
-  across frames, round-robin, no flow control. New `Frame` kind, additive. Solves both
-  peak memory (bounded frames) and multiplex fairness (interleaving), but is opt-in —
-  the *sender* must fragment, so it only helps clients that do.
+- [x] ~~**Fragmentation** (README point 11 "another day").~~ **Resolved by the h2ts
+  integration** — the same way backpressure and large-payload streaming were. Both halves of
+  the original motivation are gone on the default path:
+  - *Fairness/interleaving* — moot twice over: one WebSocket carries one stream, and where
+    streams do share a connection it is real HTTP/2, which interleaves DATA frames natively.
+  - *Peak memory* — HTTP/2 **is** the fragmentation mechanism. A large gRPC message is split
+    across bounded, flow-controlled DATA frames (`SETTINGS_MAX_FRAME_SIZE`, 16 KiB default),
+    and h2ts passes them through **sub-frame**: wslay runs with `no_buffering` and never holds
+    a whole WebSocket frame (`h2ts-server/src/wslay.rs`), and the Go `*Conn` presents the
+    tunnel as a continuous byte stream. So the transport never materializes the message; only
+    the gRPC codec does, at the message boundary — exactly as native gRPC does.
+
+  A bespoke `fragment` frame kind would therefore be reimplementing H2 DATA framing, worse and
+  only for the opt-out paths. **Deliberately not pursued** for those: on the custom `Frame`
+  path one message is still one WebSocket message, materialized at both ends and bounded by
+  `max_message_bytes` (4 MiB default) — and `json` could never be incremental regardless, since
+  it transcodes whole messages. If you need very large messages, the default path already
+  handles them; that is the answer, not a new frame kind.
 - [x] ~~**Proxy: stream large WS message payloads without buffering the whole frame.**~~
   **Resolved by the h2ts integration.** The motivation was a proxy-only peak-memory win: the
   proxy forwards `+proto` opaquely, so it never needs the whole message — only tungstenite's
@@ -222,9 +288,14 @@ Two client flavors ship: callback/EventEmitter (`makeClient`) and promise/async-
 (`makePromiseClient`). All four cardinalities + AbortSignal cancellation are covered
 end-to-end. Remaining:
 
-- [ ] **No retry / reconnect** and the WebSocket pool never reaps idle connections.
-- [ ] **`ClientReadableStream` has no backpressure / pause** — messages buffer
-  unboundedly if the consumer is slow. More visible with the async-iterable API.
+- [ ] **No retry / reconnect.** (The pool half of this item is gone with multiplexing —
+  there is no pool.)
+- [ ] **`ClientReadableStream` has no backpressure / pause** — still true, and now the
+  *only* place backpressure is missing. `call.ts` appends every inbound message to an
+  unbounded `buffer` array and `next()` drains it, so a slow `for await` consumer grows
+  memory without ever slowing the sender. The server side propagates pressure to TCP on
+  every path (see the proxy section), so this is purely a client-side fix: stop reading
+  the socket / stop granting H2 window once the buffer passes a high-water mark.
 - [x] ~~Deadlines sent but not locally enforced~~ — a client-side timer (`context.ts`)
   now fires DEADLINE_EXCEEDED on both the Fetch and WebSocket paths.
 - [x] ~~Server/client-streaming untested~~ — covered via the promise-client e2e
@@ -240,11 +311,19 @@ end-to-end. Remaining:
   uses JSON **text** frames (native message, not base64) — the WS text/binary type
   selects the codec. The TS client has a `codec: "json"` option. Covered by
   `server/tests/json.rs` and `clients/typescript/test/json.test.ts`.
-- [ ] **`Subscribe.json` flag is now vestigial** — the WS text/binary frame type
-  selects the codec, so the proto field is unused by the server. Harmless; remove on
-  a future proto cleanup.
-- [ ] **Binary metadata (`-bin`) is omitted from JSON frames** (ASCII only) — add
-  base64 handling if needed.
-- [ ] **JSON in the proxy** remains out (binary-only): the proxy is schema-agnostic and
-  would need a bundled FileDescriptorSet or upstream reflection to transcode. JSON is
-  served by the native library instead.
+- [ ] **`Subscribe.json` flag is now vestigial** — the WebSocket text/binary frame type
+  selects the codec, so **no** server reads the field (verified in `rust/…/src/ws.rs` and
+  `go/webnext/ws.go`); the TS client and the Go frame builder still set it. Harmless, but it
+  is a lie waiting to be believed. Remove on a future proto cleanup — a breaking wire change
+  only in the sense that a field number retires, so it should ride with other proto churn.
+- [x] ~~**Binary metadata (`-bin`) is omitted from JSON frames** (ASCII only).~~ Not a
+  gap — a **recorded decision**, now normative: *"Binary (`-bin`) metadata is dropped
+  crossing into the JSON codec — JSON frames carry ASCII metadata only"*
+  (`spec/PROTOCOL.md`, "JSON frame edge semantics"). Base64-in-JSON would make the frame
+  less readable, which is the JSON path's whole point; a client needing binary metadata
+  uses the binary codec, where it round-trips as raw bytes (pinned by the
+  `metadata-roundtrip-websocket` conformance case).
+- [x] ~~**JSON in the proxy** remains out (binary-only).~~ **Done (2026-07-05)** — the
+  proxy terminates `+json` via `ProxyConfig::schema` (reflection, a bundled descriptor set,
+  or both), producing output identical to the native server's. (This entry contradicted the
+  proxy section above; closed in the 2026-07-27 sweep.)

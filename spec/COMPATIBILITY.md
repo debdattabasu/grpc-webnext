@@ -8,7 +8,10 @@ and the config surface, but the underlying mechanism differs by transport.
 Legend: ✅ identical · ⚠️ semantics match, mechanism differs · ⛔ accepted for API
 compatibility but inert on this transport.
 
-| Feature | Rust (native/proxy) | Node client | Browser — Fetch (unary) | Browser — WebSocket (stream) |
+Server-side rows apply to every in-process implementation (Rust and Go) and the Rust proxy
+alike — the conformance matrix runs the same cases against each.
+
+| Feature | Server (Rust · Go · proxy) | Node client | Browser — Fetch (unary) | Browser — WebSocket (stream) |
 |---|---|---|---|---|
 | Deadlines / timeouts | ✅ | ✅ | ✅ `grpc-timeout` + timer | ✅ envelope field + timer |
 | Retries (service config, backoff, hedging) | ✅ | ✅ | ✅ client-side policy | ✅ client-side policy |
@@ -18,7 +21,7 @@ compatibility but inert on this transport.
 | Resolver (name → endpoint list) | ✅ | ✅ | ✅ endpoints are **URLs** | ✅ endpoints are **URLs** |
 | LB policy (pick_first, round_robin, custom) | ✅ | ✅ | ✅ picks among URLs | ✅ picks among WS connections |
 | Subchannel = managed transport connection | ✅ | ✅ | ⚠️ logical URL bucket; state **inferred** from responses, browser owns the socket pool | ✅ subchannel = a `WebSocket`, **real** connection state |
-| Keepalive pings (`GRPC_ARG_KEEPALIVE_*`) | ✅ | ✅ | ⛔ browser owns the connection; no JS access to h2 PING | ⚠️ emulated with app-level ping frame |
+| Keepalive pings (`GRPC_ARG_KEEPALIVE_*`) | ✅ | ✅ | ⛔ browser owns the connection; no JS access to h2 PING | ⚠️ native WS ping/pong control frames, **server-driven** |
 | DNS fan-out under one authority (many IPs → many subchannels) | ✅ | ✅ | ⛔ no per-IP pinning; resolver must emit distinct URLs | ⛔ same |
 
 ## Why the browser diverges
@@ -34,8 +37,13 @@ compatibility but inert on this transport.
   `readyState` / `onopen` / `onclose` give real CONNECTING→READY→TRANSIENT_FAILURE
   transitions. This is a faithful port. The Node client (real sockets) matches on both
   transports.
-- **Keepalive.** HTTP/2 PING is not reachable from browser JS. Accepted as config for
-  compatibility; emulated over WebSocket with an app-level ping frame; a no-op on Fetch.
+- **Keepalive.** HTTP/2 PING is not reachable from browser JS, and a browser cannot send a
+  WebSocket ping from JS either — but it *does* auto-answer a server ping with a pong. So on
+  the WebSocket path keepalive is **server-driven**, using RFC 6455 ping/pong *control*
+  frames rather than application frames (`ServerConfig::ws_keepalive` /
+  `ws_keepalive_timeout`, mirroring gRPC's `keepalive_time` / `keepalive_timeout`); see
+  [PROTOCOL.md](PROTOCOL.md#streaming--websocket). Accepted as config for compatibility on
+  Fetch, where it is a no-op.
 
 ## Same-port serving (README point 9)
 
@@ -69,7 +77,10 @@ This is **not** HTTP/2-style framing. The rules are deliberately minimal:
 
 - **Hard max-message-size.** Because a message cannot span frames, an oversized message
   is one giant WS frame — both ends must enforce a configurable size limit (same knob as
-  README point 5).
+  README point 5). This is a property of *this* path only: on the h2ts default the message
+  rides bounded, flow-controlled HTTP/2 DATA frames and the tunnel forwards them sub-frame,
+  so nothing materializes the whole message. Very large messages belong on that path — see
+  [PROTOCOL.md](PROTOCOL.md#fragmentation-why-this-protocol-doesnt-have-it).
 - **No cross-stream head-of-line blocking on this path.** Each stream has its own
   WebSocket, so a large message on one stream never delays another. (Within a stream, a
   large atomic message still occupies the socket for its transmit duration — bounded by
