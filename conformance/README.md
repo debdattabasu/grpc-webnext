@@ -93,11 +93,11 @@ grammar. Current coverage:
 | streaming | [cases/streaming.yaml](cases/streaming.yaml) | server-stream (incl. messages-then-error), client-stream aggregate (with `received_count`), bidi echo, client cancel → CANCELLED |
 | deadline | [cases/deadline.yaml](cases/deadline.yaml) | unary + stream `grpc-timeout` expiry (DEADLINE_EXCEEDED); within-deadline passes |
 | limits | [cases/limits.yaml](cases/limits.yaml) | oversize request rejected on every path, large response intact, `+json` w/o transcoder → UNIMPLEMENTED, ASCII+`-bin` metadata round-trip on **both** Fetch and WebSocket |
-| rest | [cases/rest.yaml](cases/rest.yaml) | `google.api.http` routes: `body:"*"` on Fetch and WebSocket, path/query binding, `additional_bindings`, binding precedence, status + metadata fidelity, deadlines, **multi-message** bidi and client-streaming routes, and both wrong-surface rejections |
+| rest | [cases/rest.yaml](cases/rest.yaml) | `google.api.http` routes: `body:"*"` on Fetch and WebSocket, path/query binding, `additional_bindings`, bare `*`/`**` wildcards, binding precedence, status + metadata fidelity, deadlines, **multi-message** bidi and client-streaming routes, and both wrong-surface rejections |
 
 Each case runs under every applicable **transport profile** — `proto/h2ts` (real gRPC over
 the h2ts tunnel), `proto/ws` (the custom `Frame` path, unary over Fetch), and `json` (the
-custom path, Fetch + WS) — against **every server implementation**. 72 case×profile runs per
+custom path, Fetch + WS) — against **every server implementation**. 75 case×profile runs per
 server, Rust and Go, all green.
 
 ### REST cases are different, on purpose

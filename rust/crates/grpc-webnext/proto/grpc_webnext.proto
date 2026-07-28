@@ -48,11 +48,17 @@ message Metadatum {
 
 // Open the stream. The first frame of the connection.
 message Subscribe {
+  // Field number 5 held a `json` flag saying "payloads are JSON, not binary".
+  // Nothing ever read it: the codec is decided by the WebSocket frame type (text
+  // = JSON, binary = proto), which is settled before a Subscribe is even decoded.
+  // Reserved rather than recycled, since the number shipped.
+  reserved 5;
+  reserved "json";
+
   string method = 1;                 // e.g. "/pkg.Service/Method"
   repeated Metadatum headers = 2;    // request metadata
   uint32 timeout_millis = 3;         // gRPC deadline; 0 = none
   bytes  initial_payload = 4;        // optional first message (unary-style)
-  bool   json = 5;                   // payloads are JSON (+json codec) not binary
 }
 
 // Initial response metadata, sent once before the first Message (if any).

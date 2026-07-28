@@ -51,7 +51,6 @@ fn subscribe_proto() -> TungMessage {
             headers: vec![],
             timeout_millis: 0,
             initial_payload: EchoRequest { message: "hi".into() }.encode_to_vec().into(),
-            json: false,
         })),
     }))
 }

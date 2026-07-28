@@ -245,7 +245,7 @@ func (c *wsClient) send(frame *pb.Frame) {
 // subscribe opens the stream. `payload` is the optional inline first message.
 func (c *wsClient) subscribe(md []*pb.Metadatum, timeoutMillis uint32, payload []byte) {
 	c.send(&pb.Frame{Kind: &pb.Frame_Subscribe{Subscribe: &pb.Subscribe{
-		Headers: md, TimeoutMillis: timeoutMillis, InitialPayload: payload, Json: c.jsonCodec,
+		Headers: md, TimeoutMillis: timeoutMillis, InitialPayload: payload,
 	}}})
 	c.subscribed = true
 }

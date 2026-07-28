@@ -141,7 +141,6 @@ class SingleStreamConn {
             headers: options.metadata.toMetadatumList(),
             timeoutMillis,
             initialPayload: new Uint8Array(),
-            json: false,
           },
         }),
       );

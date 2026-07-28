@@ -61,7 +61,6 @@ fn subscribe(payload: Vec<u8>) -> TungMessage {
             headers: vec![],
             timeout_millis: 0,
             initial_payload: payload.into(),
-            json: false,
         })),
     }))
 }

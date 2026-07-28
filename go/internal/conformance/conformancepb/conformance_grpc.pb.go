@@ -76,12 +76,14 @@ type ConformanceServiceClient interface {
 	// The REST alias makes this the only annotated route that carries MANY request
 	// messages, which is the one thing a single-body REST case cannot express.
 	BidiStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BidiStreamRequest, ConformancePayload], error)
-	// Unary, reachable three ways, so one RPC covers every binding shape:
+	// Unary, reachable five ways, so one RPC covers every binding shape:
 	//
 	//	GET  /v1/rest/{payload}            — the whole request from the URL
 	//	POST /v1/rest            body:"*"  — the whole request from the body
 	//	POST /v1/rest/{payload}  body:"*"  — both at once, which is the only way to
 	//	                                     assert the precedence rules
+	//	GET  /v1/rest/skip/*/{payload}     — a bare `*`: matches one segment, binds nothing
+	//	GET  /v1/rest/tail/{payload}/**    — a bare `**`: matches the remainder, binds nothing
 	RestUnary(ctx context.Context, in *RestUnaryRequest, opts ...grpc.CallOption) (*ConformancePayload, error)
 	// Server streaming with **no body at all**: the request comes entirely from the
 	// path and query, and the server injects it on the client's behalf. This is the
@@ -214,12 +216,14 @@ type ConformanceServiceServer interface {
 	// The REST alias makes this the only annotated route that carries MANY request
 	// messages, which is the one thing a single-body REST case cannot express.
 	BidiStream(grpc.BidiStreamingServer[BidiStreamRequest, ConformancePayload]) error
-	// Unary, reachable three ways, so one RPC covers every binding shape:
+	// Unary, reachable five ways, so one RPC covers every binding shape:
 	//
 	//	GET  /v1/rest/{payload}            — the whole request from the URL
 	//	POST /v1/rest            body:"*"  — the whole request from the body
 	//	POST /v1/rest/{payload}  body:"*"  — both at once, which is the only way to
 	//	                                     assert the precedence rules
+	//	GET  /v1/rest/skip/*/{payload}     — a bare `*`: matches one segment, binds nothing
+	//	GET  /v1/rest/tail/{payload}/**    — a bare `**`: matches the remainder, binds nothing
 	RestUnary(context.Context, *RestUnaryRequest) (*ConformancePayload, error)
 	// Server streaming with **no body at all**: the request comes entirely from the
 	// path and query, and the server injects it on the client's behalf. This is the

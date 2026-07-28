@@ -100,7 +100,6 @@ pub fn json_open_to_subscribe(f: JsonFrame, method: String) -> Subscribe {
         headers: json_to_meta_vec(&f.metadata),
         timeout_millis: f.timeout_millis.unwrap_or(0),
         initial_payload: f.message.as_ref().map(to_bytes).unwrap_or_default(),
-        json: true,
     }
 }
 

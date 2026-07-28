@@ -8,20 +8,25 @@
 //!   * a trailing custom verb (`/v1/things/{id}:cancel`), matched not stripped,
 //!   * `additional_bindings` (one level),
 //!   * path templates: literal segments, `{field}` / `{field=*}` single-segment
-//!     captures, and `{field=**}` (or a trailing segment) capturing the rest,
-//!     with dotted field paths (`{a.b}`) binding nested fields,
+//!     captures, `{field=**}` (or a trailing segment) capturing the rest, bare
+//!     `*` / `**` wildcards that match without capturing, and dotted field paths
+//!     (`{a.b}`) binding nested fields,
 //!   * `body: "*"` (whole message), `body: "<field>"` (a sub-message field), or none,
-//!   * query params bound to (possibly nested) scalar/repeated fields.
+//!   * query params bound to (possibly nested) scalar/repeated fields, keyed by
+//!     either the `.proto` field name or its JSON (lowerCamelCase) name.
 //!
 //! `go/webnext/httprule.go` is the deliberately parallel port of this file — same
 //! segment/body model, same matching order, same coercion table — so the two
 //! implementations can be compared side by side. The unsupported surface is
 //! identical and enumerated in `doc/HTTPRULE_GAPS.md`: `response_body`,
-//! `HttpRule.selector` (service-config rules), path patterns beyond a bare
-//! `*`/`**`, non-scalar query binding, and scalar/repeated/dotted body fields.
+//! `HttpRule.selector` (service-config rules), multi-segment patterns such as
+//! `{name=shelves/*}`, non-scalar query binding, and scalar/repeated/dotted body
+//! fields.
 
 use prost_reflect::prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, Kind, MessageDescriptor, ReflectMessage, Value};
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MessageDescriptor, ReflectMessage, Value,
+};
 
 use crate::transcode::TranscodeError;
 
@@ -38,6 +43,10 @@ enum Segment {
     Single(Vec<String>),
     /// `{field=**}` — captures the remaining components (slashes preserved).
     Rest(Vec<String>),
+    /// A bare `*` — matches exactly one component, capturing nothing.
+    AnyOne,
+    /// A bare `**` — matches the remaining components, capturing nothing.
+    AnyRest,
 }
 
 /// How the request body maps onto the message.
@@ -269,6 +278,10 @@ fn parse_template(template: &str) -> (Vec<Segment>, String) {
                 } else {
                     Segment::Single(field_path)
                 }
+            } else if seg == "*" {
+                Segment::AnyOne
+            } else if seg == "**" {
+                Segment::AnyRest
             } else {
                 Segment::Literal(seg.to_string())
             }
@@ -321,6 +334,12 @@ fn match_segments(segments: &[Segment], custom_verb: &str, path: &str) -> Option
                 vars.push((field.clone(), rest.join("/")));
                 i = parts.len();
             }
+            // Unnamed wildcards: consume, bind nothing.
+            Segment::AnyOne => {
+                parts.get(i)?;
+                i += 1;
+            }
+            Segment::AnyRest => i = parts.len(),
         }
     }
     if i == parts.len() {
@@ -379,11 +398,19 @@ fn deserialize_message(desc: MessageDescriptor, json: &[u8]) -> Result<DynamicMe
     Ok(msg)
 }
 
+/// Resolve a field by its `.proto` name, falling back to its JSON (lowerCamelCase)
+/// name. URLs are written by hand — in an annotation template by the service author,
+/// in a query string by the caller — and both conventions turn up in practice, so
+/// both resolve. grpc-gateway does the same. The proto name wins on a collision,
+/// which can only happen if a message deliberately names one field like another's
+/// JSON name.
+fn field_by_any_name(desc: &MessageDescriptor, name: &str) -> Option<FieldDescriptor> {
+    desc.get_field_by_name(name).or_else(|| desc.get_field_by_json_name(name))
+}
+
 /// Parse `json` into the (message-typed) field `name` and set it.
 fn set_message_field(msg: &mut DynamicMessage, name: &str, json: &[u8]) -> Result<(), TranscodeError> {
-    let field = msg
-        .descriptor()
-        .get_field_by_name(name)
+    let field = field_by_any_name(&msg.descriptor(), name)
         .ok_or_else(|| TranscodeError::Http(format!("unknown body field: {name}")))?;
     match field.kind() {
         Kind::Message(md) => {
@@ -397,9 +424,7 @@ fn set_message_field(msg: &mut DynamicMessage, name: &str, json: &[u8]) -> Resul
 
 /// Set a (possibly nested, possibly repeated) scalar field from a string value.
 fn set_by_path(msg: &mut DynamicMessage, path: &[String], raw: &str) -> Result<(), TranscodeError> {
-    let field = msg
-        .descriptor()
-        .get_field_by_name(&path[0])
+    let field = field_by_any_name(&msg.descriptor(), &path[0])
         .ok_or_else(|| TranscodeError::Http(format!("unknown field: {}", path[0])))?;
 
     if path.len() == 1 {
@@ -522,15 +547,59 @@ mod tests {
     }
 
     /// A path pattern richer than a bare `*`/`**` — `{name=shelves/*}` — is split
-    /// on `/` before braces are examined, so it compiles to literal segments and
-    /// the binding matches nothing it was meant to. It fails closed, but
-    /// silently; see `doc/HTTPRULE_GAPS.md`.
+    /// on `/` before braces are examined, so it compiles to segments that match
+    /// nothing it was meant to. It fails closed, but silently; see
+    /// `doc/HTTPRULE_GAPS.md`.
     #[test]
     fn nested_path_patterns_are_unsupported() {
         let (segments, _) = parse_template("/v1/{name=shelves/*/books/*}");
         assert!(match_segments(&segments, "", "/v1/shelves/1/books/2").is_none());
         assert!(match_segments(&segments, "", "/v1/anything").is_none());
         assert_eq!(segments.len(), 5);
-        assert!(segments.iter().all(|s| matches!(s, Segment::Literal(_))));
+        // The interior bare `*`s *are* wildcards — that much is supported — but the
+        // braces have already been split into literals nothing will ever match.
+        assert!(matches!(segments[1], Segment::Literal(ref l) if l == "{name=shelves"));
+        assert!(matches!(segments[2], Segment::AnyOne));
+    }
+
+    /// Field names resolve by `.proto` name or by JSON (lowerCamelCase) name, since
+    /// both turn up in hand-written URLs. The Go router is pinned by the same case
+    /// (`httprule_test.go::TestFieldNamesResolveByProtoOrJSONName`).
+    #[test]
+    fn field_names_resolve_by_proto_or_json_name() {
+        let pool = DescriptorPool::decode(testecho::FILE_DESCRIPTOR_SET).expect("descriptor set");
+        // `HttpRule` itself is in the pool (echo.proto imports the annotations) and,
+        // unlike the Echo messages, has multi-word fields — so the two spellings
+        // genuinely differ here rather than coinciding.
+        let desc = pool.get_message_by_name("google.api.HttpRule").expect("HttpRule");
+
+        let by_proto = field_by_any_name(&desc, "response_body").expect("proto name");
+        let by_json = field_by_any_name(&desc, "responseBody").expect("json name");
+        assert_eq!(by_proto.number(), by_json.number(), "both spellings must reach one field");
+
+        assert!(field_by_any_name(&desc, "additional_bindings").is_some());
+        assert!(field_by_any_name(&desc, "additionalBindings").is_some());
+        // A name that is neither still fails.
+        assert!(field_by_any_name(&desc, "responseBodyy").is_none());
+    }
+
+    /// Bare `*` and `**` — the HttpRule grammar's unnamed wildcards — match without
+    /// capturing anything.
+    #[test]
+    fn bare_wildcard_segments() {
+        let (one, verb) = parse_template("/v1/*/things/{id}");
+        assert!(matches!(one[1], Segment::AnyOne));
+        let vars = match_segments(&one, &verb, "/v1/anything/things/7").expect("should match");
+        assert_eq!(vars, vec![(vec!["id".to_string()], "7".to_string())]);
+        // Exactly one segment: neither zero nor two.
+        assert!(match_segments(&one, &verb, "/v1/things/7").is_none());
+        assert!(match_segments(&one, &verb, "/v1/a/b/things/7").is_none());
+
+        let (rest, verb) = parse_template("/v1/things/{id}/**");
+        assert!(matches!(rest[3], Segment::AnyRest));
+        let vars = match_segments(&rest, &verb, "/v1/things/7/a/b/c").expect("should match");
+        assert_eq!(vars, vec![(vec!["id".to_string()], "7".to_string())]);
+        // `**` also matches an empty remainder.
+        assert!(match_segments(&rest, &verb, "/v1/things/7").is_some());
     }
 }

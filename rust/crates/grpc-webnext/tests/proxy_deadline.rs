@@ -65,7 +65,6 @@ async fn streaming_deadline_trailer_and_upstream_cancel() {
         headers: vec![],
         timeout_millis: 200,
         initial_payload: EchoRequest { message: "go".into() }.encode_to_vec().into(),
-        json: false,
     })))
     .await
     .unwrap();

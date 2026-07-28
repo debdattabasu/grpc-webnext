@@ -42,7 +42,6 @@ fn subscribe(metadata: &[(&str, &str)]) -> TungMessage {
             headers,
             timeout_millis: 0,
             initial_payload: EchoRequest { message: "hi".into() }.encode_to_vec().into(),
-            json: false,
         })),
     }))
 }

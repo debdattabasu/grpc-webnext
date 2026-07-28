@@ -9,7 +9,10 @@ blocks the current milestone; each is a follow-up pass.
 > closes it rather than left as a standing TODO. What remains genuinely open: the Envoy
 > filters, the HttpRule tail, REST conformance cases + the TS REST helper, TS client
 > retry/reconnect and consumer backpressure, and one vestigial proto field.
-> *(Graceful shutdown and Go REST transcoding both landed later the same day.)*
+> *(Graceful shutdown and Go REST transcoding both landed later the same day; REST
+> conformance cases, two of the HttpRule gaps, and the vestigial field followed on
+> 2026-07-28. What is left is the Envoy filters, the HttpRule tail, and three client-side
+> items — see the TypeScript section.)*
 >
 > A pattern worth naming: **three separate items — backpressure, large-payload streaming, and
 > fragmentation — all closed with the same answer.** Each was a bespoke solution to a problem
@@ -212,12 +215,16 @@ needing verification.
     else fails closed. Fix this one first.
   - `HttpRule.selector` / service-config rule lists — bindings are read only from the
     method option, so a service-config `rules:` block is invisible.
-  - Bare `*`/`**` segments, and multi-segment patterns (`{name=shelves/*/books/*}`) —
-    the latter compiles to all-literal segments, i.e. a **dead route**, silently.
+  - Multi-segment patterns (`{name=shelves/*/books/*}`) — compiles to segments that
+    match nothing, i.e. a **dead route**, silently.
   - Non-scalar query binding — rules out `Timestamp`/`Duration`/`FieldMask`/wrapper
     types in the URL.
   - `body:` naming a scalar, repeated, or dotted field.
-  - Proto field names only, never their JSON (camelCase) spelling. Cheapest to add.
+
+  **Closed 2026-07-28:** bare `*`/`**` wildcard segments, and field names resolving by
+  JSON (lowerCamelCase) name as well as `.proto` name. Both landed in Rust and Go
+  together; the wildcards are covered by conformance cases, so the two servers are held
+  to them over the wire rather than each passing its own tests.
 
   *(The 2026-07-27 audit also **fixed** one thing it found rather than filing it: a
   trailing custom verb (`:cancel`) was stripped from the template instead of matched, so
@@ -230,6 +237,12 @@ needing verification.
   conformance driver deliberately does *not* want one (it proves an annotated URL needs no
   SDK by using a raw HTTP client), so this is purely an ergonomics item for application
   code that wants to hit a REST alias through the typed client.
+
+  **Bigger than it reads.** ts-proto emits **no annotation information at all** — there is
+  no `google.api` reference anywhere in the generated TS — so the typed client cannot know
+  a method *has* a REST alias, let alone what URL it maps to. This is therefore "get
+  annotations into TS codegen" first (a ts-proto plugin option, a side-car descriptor, or a
+  small generator of our own), and only then a helper. Scope it before starting.
 - [x] ~~Surface model (two rules).~~ (1) Plain HTTP (`application/json`/blank) reaches
   annotated REST endpoints always, and main gRPC paths only with
   `ServerConfig::allow_implicit_codec` (off by default). (2) grpc-webnext is the SDK:
@@ -352,11 +365,14 @@ end-to-end. Remaining:
   uses JSON **text** frames (native message, not base64) — the WS text/binary type
   selects the codec. The TS client has a `codec: "json"` option. Covered by
   `server/tests/json.rs` and `clients/typescript/test/json.test.ts`.
-- [ ] **`Subscribe.json` flag is now vestigial** — the WebSocket text/binary frame type
-  selects the codec, so **no** server reads the field (verified in `rust/…/src/ws.rs` and
-  `go/webnext/ws.go`); the TS client and the Go frame builder still set it. Harmless, but it
-  is a lie waiting to be believed. Remove on a future proto cleanup — a breaking wire change
-  only in the sense that a field number retires, so it should ride with other proto churn.
+- [x] ~~**`Subscribe.json` flag is now vestigial.**~~ **Removed (2026-07-28.)** It turned out
+  to be even less load-bearing than this entry claimed: no server read it, and it never
+  reached the wire in a meaningful state either — Rust and Go set it only inside their
+  JSON-frame→proto converters (JSON frames are text, so that `Subscribe` is never
+  serialized), and the TS client set `json: false`, which proto3 omits as a default. So the
+  removal was a pure cleanup with **zero wire impact**, not the field-number retirement this
+  entry braced for. Field 5 is `reserved` anyway, matching how the removed `ping`/`pong`
+  numbers were handled.
 - [x] ~~**Binary metadata (`-bin`) is omitted from JSON frames** (ASCII only).~~ Not a
   gap — a **recorded decision**, now normative: *"Binary (`-bin`) metadata is dropped
   crossing into the JSON codec — JSON frames carry ASCII metadata only"*

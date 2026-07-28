@@ -376,9 +376,8 @@ func TestJSONOpenToSubscribe(t *testing.T) {
 	if string(sub.GetInitialPayload()) != `{"n":1}` {
 		t.Errorf("initial payload = %q, want the inline message", sub.GetInitialPayload())
 	}
-	if !sub.GetJson() {
-		t.Error("json flag not set on a JSON open")
-	}
+	// There is deliberately no codec flag to check: the WebSocket frame type
+	// already settled that (text = JSON), before this Subscribe was built.
 	if v, ok := sub.GetHeaders()[0].GetValue().(*pb.Metadatum_AsciiValue); !ok || v.AsciiValue != "1" {
 		t.Errorf("headers = %v, want x-a=1", sub.GetHeaders())
 	}

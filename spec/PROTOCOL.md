@@ -139,17 +139,19 @@ Supported subset: verbs `get/put/post/delete/patch` + `custom`; a trailing custo
 one answers only URLs carrying it, and a binding that declares none never answers a URL
 that carries one (a colon in path *data* is percent-encoded, so it still binds);
 `additional_bindings`; path templates with literal segments, `{field}`/`{field=*}`
-single-segment captures, `{field=**}` rest-captures, and dotted field paths;
-`body: "*"` / `body: "<field>"` / none; query-param binding to scalar/repeated fields.
+single-segment captures, `{field=**}` rest-captures, bare `*`/`**` wildcards that match
+without capturing, and dotted field paths; `body: "*"` / `body: "<field>"` / none;
+query-param binding to scalar/repeated fields. Field names in a path template or a query
+key resolve by `.proto` name **or** JSON (lowerCamelCase) name.
 Where several bindings can match one URL, the **first in descriptor order wins** — there
 is no specificity ranking.
 
 Not supported — the same list in both server implementations, enumerated with its
 consequences in [`doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md): `response_body`
 (silently ignored, so the whole response message comes back), `HttpRule.selector` /
-service-config rule lists, bare `*`/`**` segments and multi-segment patterns like
-`{name=shelves/*}`, non-scalar query binding (including well-known types such as
-`FieldMask`), and scalar/repeated/dotted `body` fields.
+service-config rule lists, multi-segment patterns like `{name=shelves/*}`, non-scalar
+query binding (including well-known types such as `FieldMask`), and scalar/repeated/dotted
+`body` fields.
 
 ## Streaming — WebSocket
 

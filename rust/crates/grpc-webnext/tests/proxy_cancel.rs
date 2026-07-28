@@ -40,7 +40,6 @@ where
         headers: vec![],
         timeout_millis: 0,
         initial_payload: EchoRequest { message: "go".into() }.encode_to_vec().into(),
-        json: false,
     })))
     .await
     .unwrap();

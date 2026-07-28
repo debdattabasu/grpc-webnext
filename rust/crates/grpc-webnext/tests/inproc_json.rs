@@ -482,7 +482,6 @@ async fn ws_locks_to_binary_on_first_binary_frame() {
         headers: vec![],
         timeout_millis: 0,
         initial_payload: EchoRequest { message: "a".into() }.encode_to_vec().into(),
-        json: false,
     })))
     .await
     .unwrap();

@@ -170,6 +170,39 @@ cases:
       response:
         payload: { text: "frompath" }
 
+  # A bare `*` matches exactly one segment and binds nothing — the HttpRule
+  # grammar's unnamed wildcard, distinct from the `{field=*}` capture above.
+  - name: url-bare-wildcard-segment
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest/skip/anything/hello
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "hello" }
+
+  # ...and exactly one: a URL with nothing where the `*` is matches no binding, so
+  # it falls through to the main-path rules and is refused without the flag.
+  - name: url-bare-wildcard-needs-a-segment
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest/skip/hello
+    expect:
+      http_status: 415
+
+  # A bare `**` swallows the remainder, binding nothing from it.
+  - name: url-bare-rest-wildcard
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest/tail/hello/a/b/c
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "hello" }
+
   # --- streaming: an annotated URL is a WebSocket ------------------------------
 
   # A streaming method's annotation URL is a WebSocket endpoint. This binding is

@@ -271,7 +271,6 @@ type Subscribe struct {
 	Headers        []*Metadatum           `protobuf:"bytes,2,rep,name=headers,proto3" json:"headers,omitempty"`                                     // request metadata
 	TimeoutMillis  uint32                 `protobuf:"varint,3,opt,name=timeout_millis,json=timeoutMillis,proto3" json:"timeout_millis,omitempty"`   // gRPC deadline; 0 = none
 	InitialPayload []byte                 `protobuf:"bytes,4,opt,name=initial_payload,json=initialPayload,proto3" json:"initial_payload,omitempty"` // optional first message (unary-style)
-	Json           bool                   `protobuf:"varint,5,opt,name=json,proto3" json:"json,omitempty"`                                          // payloads are JSON (+json codec) not binary
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -332,13 +331,6 @@ func (x *Subscribe) GetInitialPayload() []byte {
 		return x.InitialPayload
 	}
 	return nil
-}
-
-func (x *Subscribe) GetJson() bool {
-	if x != nil {
-		return x.Json
-	}
-	return false
 }
 
 // Initial response metadata, sent once before the first Message (if any).
@@ -600,13 +592,12 @@ const file_grpc_webnext_proto_rawDesc = "" +
 	"\vascii_value\x18\x02 \x01(\tH\x00R\n" +
 	"asciiValue\x12\x1d\n" +
 	"\tbin_value\x18\x03 \x01(\fH\x00R\bbinValueB\a\n" +
-	"\x05value\"\xbd\x01\n" +
+	"\x05value\"\xb5\x01\n" +
 	"\tSubscribe\x12\x16\n" +
 	"\x06method\x18\x01 \x01(\tR\x06method\x124\n" +
 	"\aheaders\x18\x02 \x03(\v2\x1a.grpc.webnext.v1.MetadatumR\aheaders\x12%\n" +
 	"\x0etimeout_millis\x18\x03 \x01(\rR\rtimeoutMillis\x12'\n" +
-	"\x0finitial_payload\x18\x04 \x01(\fR\x0einitialPayload\x12\x12\n" +
-	"\x04json\x18\x05 \x01(\bR\x04json\">\n" +
+	"\x0finitial_payload\x18\x04 \x01(\fR\x0einitialPayloadJ\x04\b\x05\x10\x06R\x04json\">\n" +
 	"\x06Header\x124\n" +
 	"\aheaders\x18\x01 \x03(\v2\x1a.grpc.webnext.v1.MetadatumR\aheaders\"#\n" +
 	"\aMessage\x12\x18\n" +

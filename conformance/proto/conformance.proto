@@ -75,16 +75,20 @@ service ConformanceService {
   // `bytes` — because path and query values are strings and `bytes` has no
   // unambiguous URL spelling (see doc/HTTPRULE_GAPS.md).
 
-  // Unary, reachable three ways, so one RPC covers every binding shape:
+  // Unary, reachable five ways, so one RPC covers every binding shape:
   //   GET  /v1/rest/{payload}            — the whole request from the URL
   //   POST /v1/rest            body:"*"  — the whole request from the body
   //   POST /v1/rest/{payload}  body:"*"  — both at once, which is the only way to
   //                                        assert the precedence rules
+  //   GET  /v1/rest/skip/*/{payload}     — a bare `*`: matches one segment, binds nothing
+  //   GET  /v1/rest/tail/{payload}/**    — a bare `**`: matches the remainder, binds nothing
   rpc RestUnary(RestUnaryRequest) returns (ConformancePayload) {
     option (google.api.http) = {
       get: "/v1/rest/{payload}"
       additional_bindings { post: "/v1/rest" body: "*" }
       additional_bindings { post: "/v1/rest/{payload}" body: "*" }
+      additional_bindings { get: "/v1/rest/skip/*/{payload}" }
+      additional_bindings { get: "/v1/rest/tail/{payload}/**" }
     };
   }
 

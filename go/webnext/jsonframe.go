@@ -59,7 +59,6 @@ func jsonOpenToSubscribe(f *jsonFrame, method string) *pb.Subscribe {
 	sub := &pb.Subscribe{
 		Method:  method,
 		Headers: jsonMetaToList(f.Metadata),
-		Json:    true,
 	}
 	if f.TimeoutMillis != nil {
 		sub.TimeoutMillis = *f.TimeoutMillis

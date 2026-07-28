@@ -12,15 +12,17 @@
 //   - a trailing custom verb (`/v1/things/{id}:cancel`), matched not stripped,
 //   - `additional_bindings` (one level),
 //   - path templates: literal segments, `{field}` / `{field=*}` single-segment
-//     captures, and `{field=**}` capturing the rest, with dotted field paths
-//     (`{a.b}`) binding nested fields,
+//     captures, `{field=**}` capturing the rest, bare `*` / `**` wildcards that
+//     match without capturing, and dotted field paths (`{a.b}`) binding nested
+//     fields,
 //   - `body: "*"` (whole message), `body: "<field>"` (a sub-message field), or none,
-//   - query params bound to (possibly nested) scalar/repeated fields.
+//   - query params bound to (possibly nested) scalar/repeated fields, keyed by
+//     either the `.proto` field name or its JSON (lowerCamelCase) name.
 //
 // The unsupported surface is identical too, and enumerated in
 // doc/HTTPRULE_GAPS.md: `response_body`, `HttpRule.selector` (service-config
-// rules), path patterns beyond a bare `*`/`**`, non-scalar query binding, and
-// scalar/repeated/dotted body fields.
+// rules), multi-segment patterns such as `{name=shelves/*}`, non-scalar query
+// binding, and scalar/repeated/dotted body fields.
 
 package webnext
 
@@ -38,7 +40,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-// segmentKind distinguishes the three path-template segment forms.
+// segmentKind distinguishes the path-template segment forms.
 type segmentKind int
 
 const (
@@ -48,6 +50,10 @@ const (
 	segSingle
 	// segRest is `{field=**}` — captures the remaining components, slashes kept.
 	segRest
+	// segAnyOne is a bare `*` — matches exactly one component, capturing nothing.
+	segAnyOne
+	// segAnyRest is a bare `**` — matches the remaining components, capturing nothing.
+	segAnyRest
 )
 
 type segment struct {
@@ -253,7 +259,14 @@ func parseTemplate(template string) ([]segment, string) {
 				continue
 			}
 		}
-		out = append(out, segment{kind: segLiteral, literal: seg})
+		switch seg {
+		case "*":
+			out = append(out, segment{kind: segAnyOne})
+		case "**":
+			out = append(out, segment{kind: segAnyRest})
+		default:
+			out = append(out, segment{kind: segLiteral, literal: seg})
+		}
 	}
 	return out, customVerb
 }
@@ -307,6 +320,14 @@ func matchSegments(segments []segment, customVerb, path string) ([]pathVar, bool
 				rest = append(rest, percentDecode(p))
 			}
 			vars = append(vars, pathVar{field: seg.field, value: strings.Join(rest, "/")})
+			i = len(parts)
+		// Unnamed wildcards: consume, bind nothing.
+		case segAnyOne:
+			if i >= len(parts) {
+				return nil, false
+			}
+			i++
+		case segAnyRest:
 			i = len(parts)
 		}
 	}
@@ -429,9 +450,23 @@ func unmarshalJSON(msg protoreflect.ProtoMessage, body []byte) error {
 	return nil
 }
 
+// fieldByAnyName resolves a field by its `.proto` name, falling back to its JSON
+// (lowerCamelCase) name. URLs are written by hand — in an annotation template by
+// the service author, in a query string by the caller — and both conventions turn
+// up in practice, so both resolve. grpc-gateway does the same. The proto name wins
+// on a collision, which can only happen if a message deliberately names one field
+// like another's JSON name.
+func fieldByAnyName(desc protoreflect.MessageDescriptor, name string) protoreflect.FieldDescriptor {
+	fields := desc.Fields()
+	if fd := fields.ByName(protoreflect.Name(name)); fd != nil {
+		return fd
+	}
+	return fields.ByJSONName(name)
+}
+
 // setMessageField parses a JSON body into the (message-typed) field `name`.
 func setMessageField(msg protoreflect.Message, name string, body []byte) error {
-	fd := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
+	fd := fieldByAnyName(msg.Descriptor(), name)
 	if fd == nil {
 		return fmt.Errorf("unknown body field: %s", name)
 	}
@@ -447,7 +482,7 @@ func setMessageField(msg protoreflect.Message, name string, body []byte) error {
 // setByPath sets a (possibly nested, possibly repeated) scalar field from a
 // string value, walking a dotted field path.
 func setByPath(msg protoreflect.Message, path []string, raw string) error {
-	fd := msg.Descriptor().Fields().ByName(protoreflect.Name(path[0]))
+	fd := fieldByAnyName(msg.Descriptor(), path[0])
 	if fd == nil {
 		return fmt.Errorf("unknown field: %s", path[0])
 	}

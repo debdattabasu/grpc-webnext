@@ -485,7 +485,7 @@ func TestRouterCompilesAdditionalBindings(t *testing.T) {
 // A path pattern richer than a bare `*`/`**` — e.g. `{name=shelves/*/books/*}`,
 // which the HttpRule spec allows — is not merely approximated: the template is
 // split on `/` *before* braces are examined, so `{name=shelves` and `*}` become
-// literal segments and the binding matches NOTHING it was meant to match.
+// literal segments and the binding matches NOTHING it was meant to.
 //
 // This is the sharpest of the gaps: it fails closed (a dead route) rather than
 // mis-binding, but it fails silently at compile time. Rust splits in the same
@@ -502,14 +502,23 @@ func TestUnsupportedNestedPathPattern(t *testing.T) {
 	if _, ok := matchSegments(segments, "", "/v1/anything"); ok {
 		t.Error("nested pattern unexpectedly matched a single segment")
 	}
-	// What it compiles to: five literals, capturing nothing.
+	// What it compiles to: five segments, none of them the intended capture. The
+	// interior bare `*`s ARE wildcards (that is supported), but the braces have
+	// already been split apart into literals that nothing will ever match.
 	if len(segments) != 5 {
 		t.Fatalf("got %d segments, want 5 (%+v)", len(segments), segments)
 	}
-	for i, seg := range segments {
-		if seg.kind != segLiteral {
-			t.Errorf("segment %d is %v, want a literal", i, seg.kind)
+	for _, i := range []int{0, 1, 3, 4} {
+		if segments[i].kind != segLiteral {
+			t.Errorf("segment %d is %v, want a literal", i, segments[i].kind)
 		}
+	}
+	if segments[2].kind != segAnyOne {
+		t.Errorf("segment 2 is %v, want a bare wildcard", segments[2].kind)
+	}
+	// The give-away: `{name=shelves` became a literal nobody can match.
+	if segments[1].literal != "{name=shelves" {
+		t.Errorf("segment 1 literal = %q, want the split-apart brace", segments[1].literal)
 	}
 }
 
@@ -581,18 +590,58 @@ func TestUnsupportedNonScalarQueryBinding(t *testing.T) {
 	}
 }
 
-// Path captures and query keys match PROTO field names only, never their JSON
-// (camelCase) spelling — grpc-gateway accepts both. Shared with Rust, so the two
-// implementations agree; see doc/HTTPRULE_GAPS.md.
-func TestUnsupportedJSONFieldNames(t *testing.T) {
+// Path captures and query keys resolve by `.proto` name OR by JSON
+// (lowerCamelCase) name — both conventions turn up in hand-written URLs, and
+// grpc-gateway accepts both. Shared with Rust, so the two implementations agree.
+func TestFieldNamesResolveByProtoOrJSONName(t *testing.T) {
 	input := fixtureMessage(t)
-	msg := dynamicpb.NewMessage(input)
 
-	if err := setByPath(msg, []string{"some_field"}, "x"); err != nil {
-		t.Errorf("the proto field name should bind: %v", err)
+	for _, name := range []string{"some_field", "someField"} {
+		msg := dynamicpb.NewMessage(input)
+		if err := setByPath(msg, []string{name}, "x"); err != nil {
+			t.Errorf("%q should bind: %v", name, err)
+			continue
+		}
+		if got := str(msg, "some_field"); got != "x" {
+			t.Errorf("%q bound %q, want x", name, got)
+		}
 	}
-	if err := setByPath(msg, []string{"someField"}, "x"); err == nil {
-		t.Error("the JSON field name unexpectedly bound; if support was added, " +
-			"update doc/HTTPRULE_GAPS.md and this test")
+	// A name that is neither still fails.
+	msg := dynamicpb.NewMessage(input)
+	if err := setByPath(msg, []string{"someFieldd"}, "x"); err == nil {
+		t.Error("an unknown field should still be rejected")
+	}
+}
+
+// Bare `*` and `**` segments — unnamed wildcards from the HttpRule grammar —
+// match without capturing anything.
+func TestBareWildcardSegments(t *testing.T) {
+	one, _ := parseTemplate("/v1/*/things/{id}")
+	if one[1].kind != segAnyOne {
+		t.Fatalf("segment 1 = %v, want a single-segment wildcard", one[1].kind)
+	}
+	vars, ok := matchSegments(one, "", "/v1/anything/things/7")
+	if !ok || len(vars) != 1 || vars[0].value != "7" {
+		t.Errorf("captured %+v (ok=%v), want only id=7", vars, ok)
+	}
+	// It consumes exactly one segment: neither zero nor two.
+	if _, ok := matchSegments(one, "", "/v1/things/7"); ok {
+		t.Error("a bare `*` must not match zero segments")
+	}
+	if _, ok := matchSegments(one, "", "/v1/a/b/things/7"); ok {
+		t.Error("a bare `*` must not match two segments")
+	}
+
+	rest, _ := parseTemplate("/v1/things/{id}/**")
+	if rest[3].kind != segAnyRest {
+		t.Fatalf("segment 3 = %v, want a rest wildcard", rest[3].kind)
+	}
+	vars, ok = matchSegments(rest, "", "/v1/things/7/a/b/c")
+	if !ok || len(vars) != 1 || vars[0].value != "7" {
+		t.Errorf("captured %+v (ok=%v), want only id=7", vars, ok)
+	}
+	// `**` also matches the empty remainder.
+	if _, ok := matchSegments(rest, "", "/v1/things/7"); !ok {
+		t.Error("a trailing `**` should match an empty remainder")
 	}
 }

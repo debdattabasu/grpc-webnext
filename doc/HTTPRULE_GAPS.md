@@ -1,6 +1,6 @@
 # `google.api.http` — what is and isn't implemented
 
-*2026-07-27. Written alongside the Go REST implementation
+*Last updated 2026-07-28. Written alongside the Go REST implementation
 ([`go/webnext/httprule.go`](../go/webnext/httprule.go)), which is a deliberate port of
 the Rust router ([`rust/crates/grpc-webnext/src/httprule.rs`](../rust/crates/grpc-webnext/src/httprule.rs)).
 Auditing the two side by side is what produced this list.*
@@ -15,7 +15,9 @@ something that doesn't, and whether it's worth fixing.
 written to be structurally parallel to the Rust one so a reader can diff them, and the
 gaps are properties of the shared design rather than of one language. Where a gap is
 pinned by a test, the test is named — those tests assert *current* behavior, so adding
-support means changing them, which is the tripwire that keeps this document honest.
+support means changing them, which is the tripwire that keeps this document honest. It
+has already worked twice: the two entries closed on 2026-07-28 announced themselves as
+failing tests, not as someone remembering to reread this page.
 
 ## Supported
 
@@ -23,23 +25,28 @@ support means changing them, which is the tripwire that keeps this document hone
 |---|---|
 | `get` / `put` / `post` / `delete` / `patch` | |
 | `custom { kind, path }` | `kind` upper-cased into the HTTP method; a rule with no `kind` compiles to nothing |
-| Trailing custom verb — `/v1/things/{id}:cancel` | **Matched**, not stripped (see "Fixed during this audit") |
+| Trailing custom verb — `/v1/things/{id}:cancel` | **Matched**, not stripped (see "Closed") |
 | `additional_bindings` | One level, which is all the spec permits |
 | Literal path segments | |
 | `{field}` / `{field=*}` | Single-segment capture, percent-decoded |
 | `{field=**}` | Captures the remainder, slashes preserved |
+| Bare `*` | Matches exactly one segment, captures nothing |
+| Bare `**` | Matches the remaining segments (possibly none), captures nothing |
 | Dotted capture paths — `{user.id}` | Binds nested message fields |
 | `body: "*"` | The whole JSON body is the request message |
 | `body: "<field>"` | A singular message-typed field |
 | No body | The request is built entirely from path + query |
 | Query params → scalar fields | Including nested (`a.b=x`) and repeated (`t=1&t=2`) |
 | Enum query/path values | By name or by number |
+| Field names | Resolved by `.proto` name **or** JSON (lowerCamelCase) name |
 
 Precedence is normative in [`spec/PROTOCOL.md`](../spec/PROTOCOL.md) ("REST binding
 precedence"): the body seeds the message, path variables always overlay it, and query
 params bind only when `body` is not `"*"`.
 
-## Fixed during this audit
+## Closed
+
+### A trailing custom verb was stripped rather than matched *(2026-07-27)*
 
 **A trailing custom verb was stripped from the template but not matched against the
 request path.** `parse_template` cut everything after the first `:` and threw it away,
@@ -61,6 +68,26 @@ survives the check and still binds.
 
 Pinned by `httprule.rs::tests::custom_verb_is_part_of_the_match` and
 `httprule_test.go::TestMatchSegmentsCustomVerb`.
+
+### Bare `*` / `**` segments *(2026-07-28)*
+
+The HttpRule grammar allows an **unnamed** wildcard — `get: "/v1/*/things"` matches any
+single segment there, capturing nothing — and `**` for the remainder. Both routers treated a
+segment not wrapped in braces as a literal, so those templates matched only a path containing
+a literal `*`. Now implemented in both, and covered end to end by the conformance cases
+`url-bare-wildcard-segment`, `url-bare-wildcard-needs-a-segment`, and `url-bare-rest-wildcard`
+— which is what proves the two servers agree rather than merely each passing its own tests.
+
+Note this changes the meaning of a template containing a literal `*`. That is the correct
+reading of the grammar, and no real REST path contains one.
+
+### Field names now resolve by JSON name too *(2026-07-28)*
+
+Path captures and query keys matched the `.proto` field name only, so `?someField=x` against
+a `some_field` field was an `INVALID_ARGUMENT` — while grpc-gateway accepts both. URLs are
+hand-written (in an annotation template by the service author, in a query string by the
+caller) and both conventions turn up, so both now resolve, proto name first. This is a
+compatible widening: every URL that worked before still works.
 
 ## Gaps that give a wrong answer
 
@@ -92,19 +119,14 @@ its target through `selector` — is invisible to both implementations. There is
 mechanism to supply one, so this is a missing input format rather than a mis-read one.
 In-proto annotations are the common case by a wide margin.
 
-### Bare `*` and `**` segments
-
-The grammar allows an *unnamed* wildcard: `get: "/v1/*/things"` matches any single
-segment there, capturing nothing. Both routers treat a segment that isn't wrapped in
-braces as a literal, so `/v1/*/things` matches only a path with a literal `*` in it.
-
-### Path patterns richer than `*` / `**`
+### Multi-segment patterns
 
 `{name=shelves/*/books/*}` — a capture spanning several segments — is the sharpest of
-the gaps, because it does not degrade gracefully. The template is split on `/` *before*
-braces are examined, so `{name=shelves` and `*}` each become their own literal segment
-and the binding matches **nothing** it was meant to. It fails closed, but it fails
-silently at compile time: no error, just a route that never fires.
+the remaining gaps, because it does not degrade gracefully. The template is split on `/`
+*before* braces are examined, so `{name=shelves` and `*}` each become their own literal
+segment and the binding matches **nothing** it was meant to. (The interior bare `*`s *are*
+wildcards now; the braces around them are what got split apart.) It fails closed, but it
+fails silently at compile time: no error, just a route that never fires.
 
 *Pinned by `nested_path_patterns_are_unsupported` (Rust) and
 `TestUnsupportedNestedPathPattern` (Go).*
@@ -136,10 +158,8 @@ refused rather than guessed at.
 
 Recorded so a future reader doesn't file them as bugs.
 
-- **Proto field names only.** Path captures and query keys match the `.proto` field
-  name, never its JSON (camelCase) spelling; gRPC-gateway accepts both. Adding JSON
-  names would be a compatible widening, and is the cheapest item on this page.
-  *Pinned by `TestUnsupportedJSONFieldNames`.*
+- **Proto name wins over JSON name** when a message perversely names one field like
+  another's JSON name. *Pinned by `TestFieldNamesResolveByProtoOrJSONName`.*
 - **First match wins,** in descriptor-set file order. There is no longest-prefix or
   specificity ranking, so two bindings that can match the same URL resolve by
   declaration order. Go walks the `FileDescriptorSet` in file order specifically so this
