@@ -44,16 +44,30 @@
 //!
 //! ## Reconnect
 //!
-//! There is none: a dead tunnel stays dead and [`Client::is_closed`] reports it.
-//! Deciding when to redial is the application's, and a frontend usually wants that
-//! tied to its own lifecycle rather than hidden in a transport.
+//! [`Client`] is a gRPC **channel**, not a handle to a socket: the tunnel opens on
+//! the first call and **reopens if it drops**, the way `tonic::transport::Channel`
+//! does. The call that discovers a dead tunnel reports the failure and the next one
+//! reconnects — the transport never silently replays a request the server may
+//! already have seen, because that is a retry policy decision and not its to make.
+//!
+//! [`Client::state`] and [`Client::state_changes`] surface where the channel is
+//! (gRPC's connectivity states, `WaitForStateChange` as a stream), so an app can
+//! say something useful instead of guessing from a failed call.
+//!
+//! There is no reconnect **backoff**: like tonic, a redial happens when a call asks
+//! for one, so the call rate bounds the dial rate. A client built with
+//! [`Client::over_transport`] cannot redial at all — the transport is consumed —
+//! and says so rather than pretending to be live.
 
 mod client;
 mod codec;
 mod metadata;
+mod state;
 mod status;
 
 pub use client::{CallOptions, Client, Streaming, UnaryResponse};
+pub use client::Connector;
+pub use state::ConnectivityState;
 pub use codec::{encode_message, Deframer};
 pub use metadata::{Metadata, MetadataValue};
 pub use status::{Code, Status};

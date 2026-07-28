@@ -13,17 +13,31 @@ use crate::status::Status;
 /// every surface on one port. The scheme is mapped to `ws`/`wss`: the tunnelled
 /// HTTP/2 is always cleartext h2c, since the outer WebSocket already carries the
 /// transport security.
-pub async fn connect(base_url: &str) -> Result<Client, Status> {
-    connect_with(base_url, ConnectOptions::default()).await
+///
+/// Returns immediately: like `tonic`'s lazy channel, the tunnel opens on the first
+/// call and reopens if it drops. Errors that would have surfaced here surface on
+/// that call instead, and [`Client::state`] reports where the channel is.
+pub fn connect(base_url: &str) -> Result<Client, Status> {
+    connect_with(base_url, ConnectOptions::default())
 }
 
 /// [`connect`], with control over the HTTP/2 settings (window sizes, frame size).
-pub async fn connect_with(base_url: &str, options: ConnectOptions) -> Result<Client, Status> {
+pub fn connect_with(base_url: &str, options: ConnectOptions) -> Result<Client, Status> {
     let (ws_url, authority) = websocket_url(base_url)?;
-    let conn = h2ts_client::connect_websocket(&ws_url, &[crate::H2TS_SUBPROTOCOL], options)
-        .await
-        .map_err(|e| Status::unavailable(format!("could not open the tunnel: {}", describe(&e))))?;
-    Ok(Client::from_connection(conn, authority))
+    // A connector rather than a connection: the client redials with it when the
+    // tunnel drops, which is what makes this a gRPC channel and not a socket handle.
+    let connector: crate::Connector = std::rc::Rc::new(move || {
+        let ws_url = ws_url.clone();
+        let options = options.clone();
+        Box::pin(async move {
+            h2ts_client::connect_websocket(&ws_url, &[crate::H2TS_SUBPROTOCOL], options)
+                .await
+                .map_err(|e| {
+                    Status::unavailable(format!("could not open the tunnel: {}", describe(&e)))
+                })
+        })
+    });
+    Ok(Client::with_connector(connector, authority))
 }
 
 fn describe(value: &JsValue) -> String {

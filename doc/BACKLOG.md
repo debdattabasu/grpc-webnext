@@ -372,6 +372,35 @@ end-to-end. Remaining:
 - [x] ~~AbortSignal → WebSocket cancel~~ — `signal` now sends a `Reset` and locally
   terminates the stream with CANCELLED (deadline aborts report DEADLINE_EXCEEDED).
 
+### Rust WASM client: reconnect — **done**, retry — **declined** (2026-07-29)
+
+Reconnect was declined once and that was **wrong**, so the reasoning is worth keeping.
+
+The argument had been "a frontend owns its own lifecycle, so redial belongs to the app."
+The check that settled it was looking at what a normal Rust gRPC client does:
+`tonic::transport::Channel` wraps a `Reconnect` service that goes Idle → Connecting →
+Connected and, on failure, back to Idle so the **next call redials**. That is the gRPC
+channel contract — a channel is a virtual connection, not a socket handle — and a client
+that makes the application manage sockets is not really a channel. Implemented to match:
+the call that discovers a dead tunnel reports the failure, the next reconnects, and
+connectivity is observable through `Client::state` / `state_changes` (gRPC's
+`WaitForStateChange`, as a stream — grpc-go exposes this, tonic does not, and a frontend
+needs it more than a backend because the answer is usually a banner). No backoff, as in
+tonic: a redial happens when a call asks for one, so the call rate bounds the dial rate.
+
+**Retry stays declined**, on grounds that survive the same check:
+
+- It is service-config policy, and this client has no stub layer to hang it on — a service
+  is a few thin wrappers the caller writes. A policy engine would more than double the
+  surface of a client whose job is "frame bytes, read trailers".
+- It ships in every visitor's wasm bundle.
+- It cannot replay a caller-owned request stream without buffering everything written —
+  the same unbounded buffer declined on the response side under flow control.
+
+Note what reconnect is *not*: replaying a request the server may already have seen. The
+transport drops the dead tunnel and reports the error; whether to re-issue the call is the
+caller's, which is exactly the tonic split.
+
 ### A REST helper in the client — **declined** (2026-07-28)
 
 Calling a method through its `google.api.http` URL from the typed client, rather than

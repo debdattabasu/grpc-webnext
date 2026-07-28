@@ -4,8 +4,11 @@
 //! frontend actually is — nothing asserts `Send` to satisfy a runtime this target
 //! does not have.
 
+use std::cell::RefCell;
+use std::future::Future;
 use std::rc::Rc;
 
+use futures::future::{FutureExt, LocalBoxFuture, Shared};
 use futures::stream::{LocalBoxStream, Stream, StreamExt};
 use h2ts_client::{
     ConnectOptions, H2Connection, RequestBody, RequestInit, Response, Trailers, Transport,
@@ -13,7 +16,15 @@ use h2ts_client::{
 
 use crate::codec::{encode_message, Deframer};
 use crate::metadata::Metadata;
+use crate::state::{ConnectivityState, StateWatch};
 use crate::status::{Code, Status};
+
+/// Opens a tunnel on demand. The client holds one so it can **redial**, which is
+/// what makes it a gRPC channel rather than a handle to a socket.
+pub type Connector =
+    Rc<dyn Fn() -> LocalBoxFuture<'static, Result<H2Connection, Status>>>;
+
+type SharedDial = Shared<LocalBoxFuture<'static, Result<Rc<H2Connection>, Status>>>;
 
 const CONTENT_TYPE: &str = "application/grpc+proto";
 
@@ -52,35 +63,166 @@ impl CallOptions {
     }
 }
 
-/// A connected grpc-webnext client. Cheap to clone — every clone shares the one
-/// HTTP/2 tunnel, which is the point: calls multiplex over it.
+/// A grpc-webnext client: a gRPC **channel**, not a handle to a socket.
+///
+/// Cheap to clone — clones share one tunnel, which is the point, since calls
+/// multiplex over it. When that tunnel dies the channel redials on the next call,
+/// the way `tonic::transport::Channel` does: the call that discovers the failure
+/// reports it, and the one after reconnects. Watch [`Client::state_changes`] if the
+/// application wants to say something about it.
 #[derive(Clone)]
 pub struct Client {
-    conn: Rc<H2Connection>,
+    inner: Rc<Inner>,
+}
+
+struct Inner {
+    /// `None` for a client built over a caller-supplied transport: that transport
+    /// is consumed, so there is nothing to redial with.
+    connector: Option<Connector>,
+    tunnel: RefCell<Option<Rc<H2Connection>>>,
+    /// The dial in flight, shared so concurrent calls open **one** socket rather
+    /// than one each.
+    dialing: RefCell<Option<SharedDial>>,
+    state: StateWatch,
     authority: String,
 }
 
 impl Client {
-    /// Build a client over an existing h2ts connection.
+    /// Build a client over an existing h2ts connection. Single-shot: there is no
+    /// way to redial, so a dropped tunnel stays dropped. Prefer
+    /// [`connect`](crate::connect), which reconnects.
     pub fn from_connection(conn: H2Connection, authority: impl Into<String>) -> Client {
-        Client { conn: Rc::new(conn), authority: authority.into() }
+        let state = StateWatch::default();
+        state.set(ConnectivityState::Ready);
+        Client {
+            inner: Rc::new(Inner {
+                connector: None,
+                tunnel: RefCell::new(Some(Rc::new(conn))),
+                dialing: RefCell::new(None),
+                state,
+                authority: authority.into(),
+            }),
+        }
+    }
+
+    /// Build a **reconnecting** client from something that can open a tunnel on
+    /// demand. Each call to `connector` must yield a fresh connection, with its
+    /// driver already spawned.
+    pub fn with_connector(connector: Connector, authority: impl Into<String>) -> Client {
+        Client {
+            inner: Rc::new(Inner {
+                connector: Some(connector),
+                tunnel: RefCell::new(None),
+                dialing: RefCell::new(None),
+                state: StateWatch::default(),
+                authority: authority.into(),
+            }),
+        }
     }
 
     /// Build a client over any byte transport, returning the driver future the
     /// caller must poll. Spawn it: `wasm_bindgen_futures::spawn_local` in a
     /// browser, `tokio::task::spawn_local` on a `LocalSet` natively.
+    ///
+    /// Single-shot, since the transport is consumed — see
+    /// [`from_connection`](Self::from_connection).
     pub fn over_transport(
         transport: Transport,
         authority: impl Into<String>,
         options: ConnectOptions,
-    ) -> (Client, impl std::future::Future<Output = ()>) {
+    ) -> (Client, impl Future<Output = ()>) {
         let (conn, driver) = h2ts_client::connect(transport, options);
         (Client::from_connection(conn, authority), driver)
     }
 
-    /// True once the tunnel is gone; a client that sees this should be rebuilt.
+    /// The channel's connectivity state.
+    pub fn state(&self) -> ConnectivityState {
+        // A tunnel that died since the last call has not been noticed yet.
+        if matches!(self.inner.state.get(), ConnectivityState::Ready)
+            && self.inner.tunnel.borrow().as_ref().is_none_or(|c| c.is_closed())
+        {
+            self.inner.state.set(ConnectivityState::Idle);
+        }
+        self.inner.state.get()
+    }
+
+    /// Watch connectivity transitions — gRPC's `WaitForStateChange`, as a stream.
+    /// Repeats are collapsed, so every item is a real change.
+    pub fn state_changes(&self) -> impl Stream<Item = ConnectivityState> + 'static {
+        self.inner.state.watch()
+    }
+
+    /// True if there is no usable tunnel right now. A reconnecting client will open
+    /// one on the next call; a single-shot one will not.
     pub fn is_closed(&self) -> bool {
-        self.conn.is_closed()
+        self.inner.tunnel.borrow().as_ref().is_none_or(|c| c.is_closed())
+    }
+
+    /// The live tunnel, dialing one if needed.
+    async fn tunnel(&self) -> Result<Rc<H2Connection>, Status> {
+        // Fast path: a live tunnel. Never hold the borrow across an await.
+        let cached_is_dead = {
+            let tunnel = self.inner.tunnel.borrow();
+            match tunnel.as_ref() {
+                Some(conn) if !conn.is_closed() => return Ok(conn.clone()),
+                Some(_) => true,
+                None => false,
+            }
+        };
+        if cached_is_dead {
+            // Report the disconnect before the redial. A watcher that only ever saw
+            // Connecting -> Ready could not tell a reconnect from a first connect,
+            // which is the difference between "still fine" and "we dropped and
+            // recovered".
+            self.inner.tunnel.borrow_mut().take();
+            self.inner.state.set(ConnectivityState::Idle);
+        }
+
+        let Some(connector) = self.inner.connector.clone() else {
+            return Err(Status::unavailable(
+                "the tunnel is closed and this client cannot redial \
+                 (built over a caller-supplied transport)",
+            ));
+        };
+
+        // Join a dial already in flight rather than opening a second socket.
+        let dial = {
+            let mut dialing = self.inner.dialing.borrow_mut();
+            match dialing.as_ref() {
+                Some(shared) => shared.clone(),
+                None => {
+                    self.inner.state.set(ConnectivityState::Connecting);
+                    let shared: SharedDial =
+                        async move { connector().await.map(Rc::new) }.boxed_local().shared();
+                    *dialing = Some(shared.clone());
+                    shared
+                }
+            }
+        };
+
+        let result = dial.await;
+        // Clear the slot so a later failure redials rather than replaying this one.
+        self.inner.dialing.borrow_mut().take();
+        match result {
+            Ok(conn) => {
+                self.inner.state.set(ConnectivityState::Ready);
+                *self.inner.tunnel.borrow_mut() = Some(conn.clone());
+                Ok(conn)
+            }
+            Err(e) => {
+                self.inner.state.set(ConnectivityState::TransientFailure);
+                Err(e)
+            }
+        }
+    }
+
+    /// Note that the tunnel we just used is gone, so the next call redials.
+    fn forget(&self, dead: &Rc<H2Connection>) {
+        let mut tunnel = self.inner.tunnel.borrow_mut();
+        if tunnel.as_ref().is_some_and(|c| Rc::ptr_eq(c, dead)) {
+            tunnel.take();
+            self.inner.state.set(ConnectivityState::Idle);
+        }
     }
 
     /// Unary: one message out, one message back.
@@ -203,6 +345,7 @@ impl Client {
         body: RequestBody,
         options: &CallOptions,
     ) -> Result<Response, Status> {
+        let conn = self.tunnel().await?;
         let mut headers = vec![
             ("content-type".to_string(), CONTENT_TYPE.to_string()),
             ("te".to_string(), "trailers".to_string()),
@@ -213,18 +356,30 @@ impl Client {
         }
         headers.extend(options.metadata.to_headers());
 
-        let response = self
-            .conn
+        let response = match conn
             .request(RequestInit {
                 method: Some("POST".to_string()),
                 path: Some(path.to_string()),
-                authority: Some(self.authority.clone()),
+                authority: Some(self.inner.authority.clone()),
                 scheme: Some("http".to_string()),
                 headers,
                 body,
             })
             .await
-            .map_err(|e| Status::unavailable(format!("request failed: {e}")))?;
+        {
+            Ok(response) => response,
+            Err(e) => {
+                // The call that discovers a dead tunnel reports the failure; dropping it
+                // here is what makes the *next* call redial. Same shape as tonic's
+                // `Reconnect`, which returns to Idle on error rather than retrying in
+                // place — replaying a request the server may already have seen is a
+                // policy decision, not the transport's to make.
+                if conn.is_closed() {
+                    self.forget(&conn);
+                }
+                return Err(Status::unavailable(format!("request failed: {e}")));
+            }
+        };
 
         if response.status != 200 {
             return Err(Status::unavailable(format!("HTTP {}", response.status)));

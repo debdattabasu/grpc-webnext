@@ -11,7 +11,7 @@ trailers is the whole client.
 ```rust,ignore
 use grpc_webnext_client::{connect, CallOptions, TypedClient};
 
-let client = connect("https://api.example.com").await?;
+let client = connect("https://api.example.com")?;   // lazy: dials on first call
 
 let reply: HelloReply = client
     .unary_typed("/helloworld.Greeter/SayHello", HelloRequest { name: "world".into() }, CallOptions::new())
@@ -50,9 +50,33 @@ memory.
 
 ## Reconnect
 
-There is none: a dead tunnel stays dead and `Client::is_closed()` reports it. When to redial
-is the application's call, and a frontend usually wants that tied to its own lifecycle rather
-than hidden inside a transport.
+`Client` is a gRPC **channel**, not a handle to a socket. The tunnel opens on the first call
+and reopens if it drops — the same contract `tonic::transport::Channel` has, so an app never
+owns socket lifecycle to make an RPC.
+
+The call that finds the tunnel dead reports the failure; the next one reconnects. The
+transport does not silently replay a request the server may already have seen — that is a
+retry policy decision, and not the transport's to make.
+
+Connectivity is observable, which a frontend needs more than a backend does (the answer is
+usually a banner):
+
+```rust,ignore
+match client.state() {
+    ConnectivityState::Ready => { /* ... */ }
+    ConnectivityState::TransientFailure => show_offline_banner(),
+    _ => {}
+}
+
+// gRPC's WaitForStateChange, as a stream. Repeats are collapsed.
+while let Some(state) = client.state_changes().next().await {
+    log(state);
+}
+```
+
+No reconnect **backoff**: as in tonic, a redial happens when a call asks for one, so your
+call rate bounds the dial rate. A client built with `Client::over_transport` cannot redial —
+the transport is consumed — and says so instead of pretending to be live.
 
 ## Testing
 
