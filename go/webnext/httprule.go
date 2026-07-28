@@ -2,32 +2,29 @@
 // onto gRPC methods, binding path segments, query params, and the request body
 // into the request message.
 //
-// This is a port of the Rust crate's `src/httprule.rs`, deliberately kept
-// structurally parallel to it — same segment/body model, same matching order,
-// same coercion table — because the two implementations are one wire contract
-// and the cheapest way to keep them from drifting is for the code to be
-// comparable side by side. The supported subset is therefore identical:
+// This implements HttpRule; doc/HTTPRULE_GAPS.md is the authoritative statement of
+// the boundary, and as of 2026-07-28 there are no functional gaps in the method
+// option — only `HttpRule.selector` (service-config rules), declined.
 //
-//   - verbs `get/put/post/delete/patch` and `custom{kind}`,
-//   - a trailing custom verb (`/v1/things/{id}:cancel`), matched not stripped,
-//   - `additional_bindings` (one level),
-//   - path templates: literal segments, `{field}` / `{field=*}` single-segment
-//     captures, `{field=**}` capturing the rest, bare `*` / `**` wildcards that
-//     match without capturing, and dotted field paths (`{a.b}`) binding nested
-//     fields,
-//   - `body: "*"` (whole message), `body: "<field>"` (a sub-message field), or none,
-//   - `response_body` — answer with one top-level response field (see transcode.go),
-//   - query params bound to (possibly nested) scalar/repeated fields, keyed by
-//     either the `.proto` field name or its JSON (lowerCamelCase) name.
+// This file is a deliberate port of the Rust crate's `src/httprule.rs` — same
+// segment/body model, same matching order, same coercion table — so the two
+// implementations can be compared side by side. **Change one, change the other in
+// the same commit.**
 //
-// The unsupported surface is identical too, and enumerated in
-// doc/HTTPRULE_GAPS.md: `HttpRule.selector` (service-config rules), multi-segment
-// patterns such as `{name=shelves/*}`, non-scalar query binding, and
-// scalar/repeated/dotted body fields.
+// Two ideas carry most of the weight:
+//
+//   - Captures are patterns, not segments. segCapture holds its own sub-pattern, so
+//     `{f}`, `{f=**}` and `{f=shelves/*/books/*}` are one case rather than three.
+//     Splitting is brace-aware for exactly that reason.
+//   - Conversions belong to the JSON decoder. Anything without a scalar form —
+//     `bytes`, the well-known types, a `body:` naming a non-message field — is set
+//     by handing its protobuf-JSON text to the decoder rather than parsed here.
+//     See setFromJSON.
 
 package webnext
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -42,19 +39,23 @@ import (
 )
 
 // segmentKind distinguishes the path-template segment forms.
+//
+// Note there is no separate "single capture" / "rest capture": both are a
+// segCapture over a sub-pattern, which is what lets a capture span several
+// segments (`{name=shelves/*/books/*}`). `{f}` is sugar for `{f=*}`.
 type segmentKind int
 
 const (
 	// segLiteral is a fixed path component that must match exactly.
 	segLiteral segmentKind = iota
-	// segSingle is `{field}` / `{field=*}` — captures exactly one component.
-	segSingle
-	// segRest is `{field=**}` — captures the remaining components, slashes kept.
-	segRest
 	// segAnyOne is a bare `*` — matches exactly one component, capturing nothing.
 	segAnyOne
 	// segAnyRest is a bare `**` — matches the remaining components, capturing nothing.
 	segAnyRest
+	// segCapture is `{field=<sub-pattern>}` — binds whatever the sub-pattern
+	// consumed, joined by `/`, to a (dotted) field path. Sub-segments are never
+	// captures themselves; the grammar does not nest them.
+	segCapture
 )
 
 type segment struct {
@@ -62,6 +63,8 @@ type segment struct {
 	literal string
 	// field is the dotted field path a capture binds to (`{a.b}` -> ["a","b"]).
 	field []string
+	// sub is a capture's own pattern.
+	sub []segment
 }
 
 // bodyKind is how the request body maps onto the message.
@@ -248,40 +251,83 @@ func bodyRule(rule *annotations.HttpRule) (bodyKind, string) {
 	}
 }
 
+// splitOutsideBraces splits s on sep, ignoring separators inside `{...}`.
+//
+// This is the whole reason multi-segment captures work: splitting the raw template
+// on `/` first would tear `{name=shelves/*}` into pieces that no longer look like a
+// capture, which is precisely how they used to compile into dead literal routes.
+func splitOutsideBraces(s string, sep byte) []string {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		case sep:
+			if depth == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, s[start:])
+}
+
 // parseTemplate parses a path template into segments plus its trailing custom
 // verb (`/v1/things/{id}:cancel` -> the `cancel`), which the caller matches
 // rather than discards.
 func parseTemplate(template string) ([]segment, string) {
-	path, customVerb, _ := strings.Cut(template, ":")
+	parts := splitOutsideBraces(template, ':')
+	path, customVerb := parts[0], ""
+	if len(parts) > 1 {
+		customVerb = strings.Join(parts[1:], ":")
+	}
+
 	var out []segment
-	for _, seg := range strings.Split(strings.Trim(path, "/"), "/") {
+	for _, seg := range splitOutsideBraces(strings.Trim(path, "/"), '/') {
 		if seg == "" {
 			continue
 		}
-		if inner, ok := strings.CutPrefix(seg, "{"); ok {
-			if inner, ok := strings.CutSuffix(inner, "}"); ok {
-				field, pattern, hasPattern := strings.Cut(inner, "=")
-				if !hasPattern {
-					pattern = "*"
-				}
-				kind := segSingle
-				if pattern == "**" {
-					kind = segRest
-				}
-				out = append(out, segment{kind: kind, field: strings.Split(field, ".")})
-				continue
-			}
-		}
-		switch seg {
-		case "*":
-			out = append(out, segment{kind: segAnyOne})
-		case "**":
-			out = append(out, segment{kind: segAnyRest})
-		default:
-			out = append(out, segment{kind: segLiteral, literal: seg})
-		}
+		out = append(out, parseSegment(seg))
 	}
 	return out, customVerb
+}
+
+// parseSegment parses one template segment: a capture (with its own sub-pattern)
+// or a plain one.
+func parseSegment(seg string) segment {
+	if inner, ok := strings.CutPrefix(seg, "{"); ok {
+		if inner, ok := strings.CutSuffix(inner, "}"); ok {
+			field, pattern, hasPattern := strings.Cut(inner, "=")
+			if !hasPattern {
+				pattern = "*"
+			}
+			var sub []segment
+			for _, p := range strings.Split(strings.Trim(pattern, "/"), "/") {
+				if p != "" {
+					sub = append(sub, plainSegment(p))
+				}
+			}
+			return segment{kind: segCapture, field: strings.Split(field, "."), sub: sub}
+		}
+	}
+	return plainSegment(seg)
+}
+
+// plainSegment is a non-capturing segment: a wildcard or a literal.
+func plainSegment(seg string) segment {
+	switch seg {
+	case "*":
+		return segment{kind: segAnyOne}
+	case "**":
+		return segment{kind: segAnyRest}
+	default:
+		return segment{kind: segLiteral, literal: seg}
+	}
 }
 
 // matchSegments matches a request path against a template, returning the
@@ -312,42 +358,50 @@ func matchSegments(segments []segment, customVerb, path string) ([]pathVar, bool
 	} else if customVerb != "" {
 		return nil, false
 	}
+
 	var vars []pathVar
-	i := 0
+	end, ok := matchList(segments, parts, 0, &vars)
+	if !ok || end != len(parts) {
+		return nil, false
+	}
+	return vars, true
+}
+
+// matchList matches segments against parts[i:], collecting captures. It returns
+// the index just past what was consumed, or false if the pattern does not fit.
+func matchList(segments []segment, parts []string, i int, vars *[]pathVar) (int, bool) {
 	for _, seg := range segments {
 		switch seg.kind {
 		case segLiteral:
 			if i >= len(parts) || parts[i] != seg.literal {
-				return nil, false
+				return 0, false
 			}
 			i++
-		case segSingle:
-			if i >= len(parts) {
-				return nil, false
-			}
-			vars = append(vars, pathVar{field: seg.field, value: percentDecode(parts[i])})
-			i++
-		case segRest:
-			rest := make([]string, 0, len(parts)-i)
-			for _, p := range parts[i:] {
-				rest = append(rest, percentDecode(p))
-			}
-			vars = append(vars, pathVar{field: seg.field, value: strings.Join(rest, "/")})
-			i = len(parts)
-		// Unnamed wildcards: consume, bind nothing.
 		case segAnyOne:
 			if i >= len(parts) {
-				return nil, false
+				return 0, false
 			}
 			i++
 		case segAnyRest:
 			i = len(parts)
+		case segCapture:
+			start := i
+			next, ok := matchList(seg.sub, parts, i, vars)
+			if !ok {
+				return 0, false
+			}
+			i = next
+			// The captured value is everything the sub-pattern consumed. Each
+			// component is decoded separately, then joined — so an encoded `%2F`
+			// inside a component never reads as a separator.
+			decoded := make([]string, 0, i-start)
+			for _, p := range parts[start:i] {
+				decoded = append(decoded, percentDecode(p))
+			}
+			*vars = append(*vars, pathVar{field: seg.field, value: strings.Join(decoded, "/")})
 		}
 	}
-	if i != len(parts) {
-		return nil, false
-	}
-	return vars, true
+	return i, true
 }
 
 // matchWS matches a WebSocket upgrade path against the bindings. A WS upgrade is
@@ -365,7 +419,9 @@ func (r *httpRouter) matchWS(path, query string) *wsBinding {
 func (r *httpRouter) matchRequest(method, path string) (*binding, []pathVar, bool) {
 	want := strings.ToUpper(method)
 	for _, b := range r.bindings {
-		if b.httpMethod != want {
+		// `custom { kind: "*" }` is HttpRule's "leave the HTTP method unspecified
+		// for this rule" — it matches any verb, not a literal `*`.
+		if b.httpMethod != want && b.httpMethod != "*" {
 			continue
 		}
 		if vars, ok := matchSegments(b.segments, b.customVerb, path); ok {
@@ -477,19 +533,57 @@ func fieldByAnyName(desc protoreflect.MessageDescriptor, name string) protorefle
 	return fields.ByJSONName(name)
 }
 
-// setMessageField parses a JSON body into the (message-typed) field `name`.
+// setFromJSON sets one field by handing its protobuf-JSON text to the *decoder*,
+// rather than converting by hand.
+//
+// This is the same move `response_body` makes on the way out, in reverse: the
+// library already knows how every field shape is spelled in JSON — base64 for
+// `bytes`, RFC 3339 for a `Timestamp`, `"a,b"` for a `FieldMask`, `"3.5s"` for a
+// `Duration` — and re-deriving those rules by hand in two languages is how the
+// implementations would drift. So build `{"<jsonName>": <text>}`, decode it into a
+// scratch message, and lift the field across.
+func setFromJSON(msg protoreflect.Message, fd protoreflect.FieldDescriptor, jsonText string) error {
+	name, _ := json.Marshal(fd.JSONName())
+	doc := []byte("{" + string(name) + ":" + jsonText + "}")
+	scratch := dynamicpb.NewMessage(msg.Descriptor())
+	if err := (protojson.UnmarshalOptions{}).Unmarshal(doc, scratch); err != nil {
+		return fmt.Errorf("invalid value for %s: %w", fd.Name(), err)
+	}
+	msg.Set(fd, scratch.Get(fd))
+	return nil
+}
+
+// wktJSONShape reports whether a message field has a canonical protobuf-JSON form
+// a bare URL value can be bound to, and whether that form is a string (so the raw
+// value needs quoting). These are the well-known types a REST URL realistically
+// carries — `?update_mask=a,b`, `?ttl=3.5s`, `?since=2026-01-01T00:00:00Z`. Any
+// other message is still refused: a query parameter cannot carry an arbitrary
+// submessage.
+func wktJSONShape(md protoreflect.MessageDescriptor) (quoted, ok bool) {
+	switch md.FullName() {
+	// Encoded as a JSON string — quote the raw value.
+	case "google.protobuf.Timestamp", "google.protobuf.Duration", "google.protobuf.FieldMask",
+		"google.protobuf.StringValue", "google.protobuf.BytesValue",
+		"google.protobuf.Int64Value", "google.protobuf.UInt64Value":
+		return true, true
+	// Encoded as a bare JSON number/bool — pass the raw value through.
+	case "google.protobuf.BoolValue", "google.protobuf.Int32Value", "google.protobuf.UInt32Value",
+		"google.protobuf.FloatValue", "google.protobuf.DoubleValue":
+		return false, true
+	}
+	return false, false
+}
+
+// setMessageField parses a JSON body into the top-level field `name`.
 func setMessageField(msg protoreflect.Message, name string, body []byte) error {
 	fd := fieldByAnyName(msg.Descriptor(), name)
 	if fd == nil {
 		return fmt.Errorf("unknown body field: %s", name)
 	}
-	if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
-		return fmt.Errorf("body field %s must be a message", name)
-	}
-	if fd.IsList() || fd.IsMap() {
-		return fmt.Errorf("body field %s must be a message", name)
-	}
-	return unmarshalJSON(msg.Mutable(fd).Message().Interface(), body)
+	// Any top-level field, not just a message: `body: "content"` on a `string` takes
+	// a JSON string, `body: "items"` on a repeated field takes an array. HttpRule
+	// requires only that the field be top-level.
+	return setFromJSON(msg, fd, string(body))
 }
 
 // setByPath sets a (possibly nested, possibly repeated) scalar field from a
@@ -501,6 +595,26 @@ func setByPath(msg protoreflect.Message, path []string, raw string) error {
 	}
 
 	if len(path) == 1 {
+		// Kinds with no scalar value form bind through the JSON decoder instead:
+		// `bytes` (base64) and the string-shaped well-known types.
+		switch {
+		case fd.Kind() == protoreflect.BytesKind:
+			quoted, _ := json.Marshal(raw)
+			return setFromJSON(msg, fd, string(quoted))
+		case (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) &&
+			!fd.IsList() && !fd.IsMap():
+			quote, ok := wktJSONShape(fd.Message())
+			if !ok {
+				return fmt.Errorf("cannot bind a path/query value to message field %s (%s)",
+					fd.Name(), fd.Message().FullName())
+			}
+			text := raw
+			if quote {
+				b, _ := json.Marshal(raw)
+				text = string(b)
+			}
+			return setFromJSON(msg, fd, text)
+		}
 		value, err := coerce(fd, raw)
 		if err != nil {
 			return err
@@ -581,8 +695,10 @@ func coerce(fd protoreflect.FieldDescriptor, raw string) (protoreflect.Value, er
 			return protoreflect.Value{}, fmt.Errorf("unknown enum value: %q", raw)
 		}
 		return protoreflect.ValueOfEnum(v.Number()), nil
+	// Unreachable: setByPath routes this to the JSON decoder above. Kept so the
+	// switch stays exhaustive over the scalar kinds rather than falling through.
 	case protoreflect.BytesKind:
-		return protoreflect.Value{}, fmt.Errorf("bytes fields cannot bind from path/query")
+		return protoreflect.Value{}, fmt.Errorf("bytes must bind through the JSON decoder")
 	default:
 		return protoreflect.Value{}, fmt.Errorf("cannot bind a scalar to a message field")
 	}

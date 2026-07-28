@@ -205,64 +205,25 @@ needing verification.
   `/proto/google/api/`, and included from there by every consumer (the Rust test service,
   the conformance protos, and the Go/TS codegen) — moved there on 2026-07-27 when the
   conformance suite started needing them too.
-- [ ] **Unsupported HttpRule bits.** Audited in full on 2026-07-27 alongside the Go port;
-  every item, what it actually does when you use it, and whether it's worth fixing is in
-  [doc/HTTPRULE_GAPS.md](HTTPRULE_GAPS.md), with a test pinning each. The list is
-  **identical in both server implementations** by construction, so this is one item, not
-  two. Ranked by consequence:
-  - `response_body` is **silently ignored** — the whole response message comes back
-    instead of the named field. The only gap that returns a *wrong answer*; everything
-    else fails closed. Fix this one first.
-  - `HttpRule.selector` / service-config rule lists — bindings are read only from the
-    method option, so a service-config `rules:` block is invisible.
-  - Multi-segment patterns (`{name=shelves/*/books/*}`) — compiles to segments that
-    match nothing, i.e. a **dead route**, silently.
-  - Non-scalar query binding — rules out `Timestamp`/`Duration`/`FieldMask`/wrapper
-    types in the URL.
-  - `body:` naming a scalar, repeated, or dotted field.
+- [x] ~~**Unsupported HttpRule bits.**~~ **Closed 2026-07-28.** Audited in full on
+  2026-07-27 alongside the Go port, then finished: `response_body`, multi-segment captures
+  (`{name=shelves/*/books/*}`), bare `*`/`**` wildcards, `custom { kind: "*" }`, `bytes` and
+  well-known types from a query, `body:` naming any top-level field, and field names
+  resolving by JSON spelling. Every one landed in Rust and Go together.
 
-  **Closed 2026-07-28:** `response_body` (the last gap that returned a *wrong answer*),
-  bare `*`/`**` wildcard segments, and field names resolving by JSON (lowerCamelCase) name
-  as well as `.proto` name. All landed in Rust and Go together and are covered by
-  conformance cases, so the two servers are held to them over the wire rather than each
-  passing its own tests.
+  **There are no functional gaps left** in the `google.api.http` method option. What remains
+  is one *declined* input format — `HttpRule.selector` / service-config rule lists, a new
+  configuration surface rather than a parsing fix, which the conformance matrix could not
+  cover without every implementation also growing service-config loading — plus a set of
+  recorded decisions where the spec itself forbids something. Both are written up, with
+  their reasoning and the tests that pin them, in [doc/HTTPRULE_GAPS.md](HTTPRULE_GAPS.md).
 
-  *(The 2026-07-27 audit also **fixed** one thing it found rather than filing it: a
-  trailing custom verb (`:cancel`) was stripped from the template instead of matched, so
-  it answered the bare resource URL, leaked into the captured variable, and collided with
-  every other verb on that resource. That was mis-routing, not a missing feature.)*
-- [x] ~~REST transcoding in the proxy (2026-07-05).~~ Done on both Fetch and WebSocket;
-  see the proxy section above for details and the reflection option-preservation caveat.
-- [ ] **Client-side REST helper** — the generated TS client still calls the gRPC-style
-  path; there's no helper to construct the annotated REST URL from the client. Note the
-  conformance driver deliberately does *not* want one (it proves an annotated URL needs no
-  SDK by using a raw HTTP client), so this is purely an ergonomics item for application
-  code that wants to hit a REST alias through the typed client.
+  *A pattern worth carrying forward: three of these ("`body:` on a scalar", "`bytes` from a
+  query", "well-known types from a query") looked like three features and were one idea —
+  stop hand-writing conversions and hand the value to the JSON decoder, which already knows
+  every protobuf-JSON spelling. That is `response_body` in reverse. Reach for it before
+  writing a parser.*
 
-  **Bigger than it reads.** ts-proto emits **no annotation information at all** — there is
-  no `google.api` reference anywhere in the generated TS — so the typed client cannot know
-  a method *has* a REST alias, let alone what URL it maps to. This is therefore "get
-  annotations into TS codegen" first (a ts-proto plugin option, a side-car descriptor, or a
-  small generator of our own), and only then a helper. Scope it before starting.
-- [x] ~~Surface model (two rules).~~ (1) Plain HTTP (`application/json`/blank) reaches
-  annotated REST endpoints always, and main gRPC paths only with
-  `ServerConfig::allow_implicit_codec` (off by default). (2) grpc-webnext is the SDK:
-  `+proto`/`+json` on all main paths; `+json` also on annotated routes. `+proto`/`+multi`
-  on a REST route is the wrong surface (415 / WS close `4009`). Rejections are explicit
-  (415, or a `4000+code` WS close; unknown content-type → 415; unknown method →
-  UNIMPLEMENTED). Covered by `server/tests/json.rs` (`main_endpoint_rejects_*`,
-  `implicit_codec_flag_allows_*`, `fetch_*`, `ws_rejects_missing_codec_subprotocol_by_default`).
-- [x] ~~WS → annotated-endpoint routing.~~ A WebSocket whose upgrade URL matches a
-  binding is routed to the RPC: text-locked single-stream JSON (blank / `application/json`
-  / `grpc-webnext+json`), method + path/query from the binding (`Subscribe` method
-  ignored). `body:"*"` routes take each frame as a request message; body-less (GET) routes
-  build the single request from the URL and stream responses. Covered by
-  `server/tests/json.rs` (`ws_annotation_*`).
-- [x] ~~**WS annotation routing in the proxy**~~ — **Done (2026-07-05)**, at the same time
-  as the rest of proxy REST routing: `match_ws` resolves the upgrade URL against the
-  proxy's transcoder (bundle or reflection snapshot). Both modes share one `Runtime`, so
-  there is nothing proxy-specific left here. (This entry predated that work and
-  contradicted the proxy section above; closed in the 2026-07-27 sweep.)
 - [x] ~~**REST transcoding in the Go server.**~~ **Done (2026-07-27.)** `go/webnext/httprule.go`
   is a structurally parallel port of `httprule.rs`, wired into both surfaces: Fetch tries a
   REST binding before the main method path (and before the implicit-codec gate, since

@@ -102,6 +102,10 @@ service ConformanceService {
       // already covers.
       additional_bindings { get: "/v1/rest-body/{payload}" response_body: "payload" }
       additional_bindings { post: "/v1/rest-body" body: "*" response_body: "payload" }
+      // A capture spanning several segments — the canonical resource-name shape.
+      additional_bindings { get: "/v1/rest-nested/{payload=shelves/*/books/*}" }
+      // `body:` naming a non-message top-level field: the body is a bare JSON string.
+      additional_bindings { post: "/v1/rest-strbody" body: "payload" }
     };
   }
 
@@ -124,6 +128,12 @@ message RestUnaryRequest {
   string payload = 1;         // echoed back as ConformancePayload.payload (UTF-8)
   uint32 status_code = 2;     // non-zero => terminal error, so REST error paths are testable
   string status_message = 3;
+  // NOTE: deliberately no well-known-type field here. Binding one from a query
+  // param IS supported (`?update_mask=a,b`), but proving it in the matrix would put
+  // a WKT in the *shared contract*, and every implementation then pays for it in
+  // codegen — ts-proto, for one, answers a single `FieldMask` reference by emitting
+  // 7 300 lines of `descriptor.ts` alongside it. That coverage lives in the
+  // per-language unit tests instead; see doc/HTTPRULE_GAPS.md.
 }
 
 // A REST-shaped server-streaming request.

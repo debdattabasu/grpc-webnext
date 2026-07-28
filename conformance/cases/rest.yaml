@@ -203,6 +203,42 @@ cases:
       response:
         payload: { text: "hello" }
 
+  # A capture may span SEVERAL segments — `{payload=shelves/*/books/*}`, the
+  # canonical Google resource-name shape. The bound value is everything the
+  # sub-pattern consumed, joined by `/`.
+  - name: url-multi-segment-capture
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest-nested/shelves/1/books/2
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "shelves/1/books/2" }
+
+  # The sub-pattern is a pattern, not a prefix: a URL whose shape does not line up
+  # matches no binding and falls through to the main-path rules.
+  - name: url-multi-segment-capture-shape-must-match
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest-nested/racks/1/books/2
+    expect:
+      http_status: 415
+
+  # `body:` may name a non-message top-level field, so the body is a bare JSON
+  # string rather than an object.
+  - name: body-names-a-scalar-field
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/rest-strbody
+      body: '"fromstring"'
+    expect:
+      status: { code: 0 }
+      response:
+        payload: { text: "fromstring" }
+
   # --- response_body: the body is ONE field, not the whole message --------------
   #
   # These are the only cases whose body is not a ConformancePayload, which is why

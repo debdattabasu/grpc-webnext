@@ -2,26 +2,24 @@
 //! onto gRPC methods, binding path segments, query params, and the request body
 //! into the request message.
 //!
-//! This is a practical subset of the HttpRule spec — enough for the common
-//! `get: "/v1/x/{id}"` / `post: "/v1/x" body: "*"` bindings:
-//!   * verbs `get/put/post/delete/patch` and `custom{kind}`,
-//!   * a trailing custom verb (`/v1/things/{id}:cancel`), matched not stripped,
-//!   * `additional_bindings` (one level),
-//!   * path templates: literal segments, `{field}` / `{field=*}` single-segment
-//!     captures, `{field=**}` (or a trailing segment) capturing the rest, bare
-//!     `*` / `**` wildcards that match without capturing, and dotted field paths
-//!     (`{a.b}`) binding nested fields,
-//!   * `body: "*"` (whole message), `body: "<field>"` (a sub-message field), or none,
-//!   * `response_body` — answer with one top-level response field (see `transcode.rs`),
-//!   * query params bound to (possibly nested) scalar/repeated fields, keyed by
-//!     either the `.proto` field name or its JSON (lowerCamelCase) name.
+//! This implements HttpRule; `doc/HTTPRULE_GAPS.md` is the authoritative statement
+//! of the boundary, and as of 2026-07-28 there are no functional gaps in the method
+//! option — only `HttpRule.selector` (service-config rules), declined.
 //!
 //! `go/webnext/httprule.go` is the deliberately parallel port of this file — same
 //! segment/body model, same matching order, same coercion table — so the two
-//! implementations can be compared side by side. The unsupported surface is
-//! identical and enumerated in `doc/HTTPRULE_GAPS.md`: `HttpRule.selector`
-//! (service-config rules), multi-segment patterns such as `{name=shelves/*}`,
-//! non-scalar query binding, and scalar/repeated/dotted body fields.
+//! implementations can be compared side by side. **Change one, change the other in
+//! the same commit.**
+//!
+//! Two ideas carry most of the weight:
+//!
+//!   * **Captures are patterns, not segments.** [`Segment::Capture`] holds its own
+//!     sub-pattern, so `{f}`, `{f=**}` and `{f=shelves/*/books/*}` are one case
+//!     rather than three. Splitting is brace-aware for exactly that reason.
+//!   * **Conversions belong to the JSON decoder.** Anything without a scalar form —
+//!     `bytes`, the well-known types, a `body:` naming a non-message field — is set
+//!     by handing its protobuf-JSON text to the decoder rather than parsed here.
+//!     See [`set_from_json`].
 
 use prost_reflect::prost::Message;
 use prost_reflect::{
@@ -34,19 +32,22 @@ use crate::transcode::TranscodeError;
 const HTTP_EXT: &str = "google.api.http";
 
 /// A parsed path-template segment.
+///
+/// Note there is no separate "single capture" / "rest capture": both are a
+/// [`Segment::Capture`] over a sub-pattern, which is what lets a capture span
+/// several segments (`{name=shelves/*/books/*}`). `{f}` is sugar for `{f=*}`.
 #[derive(Debug, Clone)]
 enum Segment {
     /// A fixed path component that must match exactly.
     Literal(String),
-    /// `{field}` / `{field=*}` — captures exactly one path component into `field`
-    /// (a dotted path into the request message).
-    Single(Vec<String>),
-    /// `{field=**}` — captures the remaining components (slashes preserved).
-    Rest(Vec<String>),
     /// A bare `*` — matches exactly one component, capturing nothing.
     AnyOne,
     /// A bare `**` — matches the remaining components, capturing nothing.
     AnyRest,
+    /// `{field=<sub-pattern>}` — binds whatever the sub-pattern consumed, joined
+    /// by `/`, to a (dotted) field path. Sub-segments are never captures
+    /// themselves; the grammar does not nest them.
+    Capture(Vec<String>, Vec<Segment>),
 }
 
 /// How the request body maps onto the message.
@@ -182,7 +183,9 @@ impl HttpRouter {
     fn match_request(&self, method: &str, path: &str) -> Option<(&Binding, Vec<PathVar>)> {
         let want = method.to_ascii_uppercase();
         for b in &self.bindings {
-            if b.http_method != want {
+            // `custom { kind: "*" }` is HttpRule's "leave the HTTP method
+            // unspecified for this rule" — it matches any verb, not a literal `*`.
+            if b.http_method != want && b.http_method != "*" {
                 continue;
             }
             if let Some(vars) = match_segments(&b.segments, &b.custom_verb, path) {
@@ -277,37 +280,70 @@ fn body_rule(rule: &DynamicMessage) -> BodyRule {
     }
 }
 
+/// Split `s` on `sep`, ignoring separators that appear inside `{...}`.
+///
+/// This is the whole reason multi-segment captures work: splitting the raw
+/// template on `/` first would tear `{name=shelves/*}` into pieces that no longer
+/// look like a capture, which is precisely how they used to compile into dead
+/// literal routes.
+fn split_outside_braces(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if c == sep && depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
 /// Parse a path template into segments plus its trailing custom verb
 /// (`/v1/things/{id}:cancel` -> the `cancel`), which the caller matches rather
 /// than discards.
 fn parse_template(template: &str) -> (Vec<Segment>, String) {
-    let (path, custom_verb) = match template.split_once(':') {
-        Some((path, verb)) => (path, verb.to_string()),
-        None => (template, String::new()),
-    };
-    let segments = path
-        .trim_matches('/')
-        .split('/')
+    let parts = split_outside_braces(template, ':');
+    let path = parts[0];
+    let custom_verb = if parts.len() > 1 { parts[1..].join(":") } else { String::new() };
+
+    let segments = split_outside_braces(path.trim_matches('/'), '/')
+        .into_iter()
         .filter(|s| !s.is_empty())
-        .map(|seg| {
-            if let Some(inner) = seg.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
-                let (field, pattern) = inner.split_once('=').unwrap_or((inner, "*"));
-                let field_path: Vec<String> = field.split('.').map(str::to_string).collect();
-                if pattern == "**" {
-                    Segment::Rest(field_path)
-                } else {
-                    Segment::Single(field_path)
-                }
-            } else if seg == "*" {
-                Segment::AnyOne
-            } else if seg == "**" {
-                Segment::AnyRest
-            } else {
-                Segment::Literal(seg.to_string())
-            }
-        })
+        .map(parse_segment)
         .collect();
     (segments, custom_verb)
+}
+
+/// One template segment: a capture (with its own sub-pattern) or a plain one.
+fn parse_segment(seg: &str) -> Segment {
+    if let Some(inner) = seg.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        let (field, pattern) = inner.split_once('=').unwrap_or((inner, "*"));
+        let field_path: Vec<String> = field.split('.').map(str::to_string).collect();
+        let subs = pattern
+            .trim_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(plain_segment)
+            .collect();
+        return Segment::Capture(field_path, subs);
+    }
+    plain_segment(seg)
+}
+
+/// A non-capturing segment: a wildcard or a literal.
+fn plain_segment(seg: &str) -> Segment {
+    match seg {
+        "*" => Segment::AnyOne,
+        "**" => Segment::AnyRest,
+        _ => Segment::Literal(seg.to_string()),
+    }
 }
 
 /// Match a request path against a template, returning captured `(field_path, value)`.
@@ -335,7 +371,13 @@ fn match_segments(segments: &[Segment], custom_verb: &str, path: &str) -> Option
         None => {}
     }
     let mut vars = Vec::new();
-    let mut i = 0;
+    let end = match_list(segments, &parts, 0, &mut vars)?;
+    (end == parts.len()).then_some(vars)
+}
+
+/// Match `segments` against `parts[i..]`, collecting captures. Returns the index
+/// just past what was consumed, or `None` if the pattern does not fit.
+fn match_list(segments: &[Segment], parts: &[&str], mut i: usize, vars: &mut Vec<PathVar>) -> Option<usize> {
     for seg in segments {
         match seg {
             Segment::Literal(lit) => {
@@ -344,29 +386,24 @@ fn match_segments(segments: &[Segment], custom_verb: &str, path: &str) -> Option
                 }
                 i += 1;
             }
-            Segment::Single(field) => {
-                let part = parts.get(i)?;
-                vars.push((field.clone(), percent_decode(part)));
-                i += 1;
-            }
-            Segment::Rest(field) => {
-                let rest: Vec<String> = parts[i..].iter().map(|p| percent_decode(p)).collect();
-                vars.push((field.clone(), rest.join("/")));
-                i = parts.len();
-            }
-            // Unnamed wildcards: consume, bind nothing.
             Segment::AnyOne => {
                 parts.get(i)?;
                 i += 1;
             }
             Segment::AnyRest => i = parts.len(),
+            Segment::Capture(field, subs) => {
+                let start = i;
+                i = match_list(subs, parts, i, vars)?;
+                // The captured value is everything the sub-pattern consumed. Each
+                // component is decoded separately, then joined — so an encoded `%2F`
+                // inside a component never reads as a separator.
+                let value =
+                    parts[start..i].iter().map(|p| percent_decode(p)).collect::<Vec<_>>().join("/");
+                vars.push((field.clone(), value));
+            }
         }
     }
-    if i == parts.len() {
-        Some(vars)
-    } else {
-        None
-    }
+    Some(i)
 }
 
 /// Build the encoded request message from a matched binding + inputs.
@@ -428,18 +465,58 @@ pub(crate) fn field_by_any_name(desc: &MessageDescriptor, name: &str) -> Option<
     desc.get_field_by_name(name).or_else(|| desc.get_field_by_json_name(name))
 }
 
-/// Parse `json` into the (message-typed) field `name` and set it.
+/// Set one field by handing its protobuf-JSON text to the *decoder*, rather than
+/// converting by hand.
+///
+/// This is the same move `response_body` makes on the way out, in reverse: the
+/// library already knows how every field shape is spelled in JSON — base64 for
+/// `bytes`, RFC 3339 for a `Timestamp`, `"a,b"` for a `FieldMask`, `"3.5s"` for a
+/// `Duration` — and re-deriving those rules by hand in two languages is how the
+/// implementations would drift. So build `{"<jsonName>": <text>}`, decode it into
+/// a scratch message, and lift the field across.
+fn set_from_json(msg: &mut DynamicMessage, field: &FieldDescriptor, json_text: &str) -> Result<(), TranscodeError> {
+    let doc = format!("{{{}:{}}}", serde_json::to_string(field.json_name()).unwrap(), json_text);
+    let scratch = deserialize_message(msg.descriptor(), doc.as_bytes())
+        .map_err(|e| TranscodeError::Http(format!("invalid value for {}: {e}", field.name())))?;
+    msg.set_field(field, scratch.get_field(field).into_owned());
+    Ok(())
+}
+
+/// Whether a message field has a canonical protobuf-JSON **string** form, so a
+/// bare URL value can be bound to it by quoting. These are the well-known types a
+/// REST URL realistically carries — `?update_mask=a,b`, `?ttl=3.5s`,
+/// `?since=2026-01-01T00:00:00Z`. Any other message is still refused: a query
+/// parameter cannot carry an arbitrary submessage.
+fn wkt_json_shape(md: &MessageDescriptor) -> Option<bool> {
+    match md.full_name() {
+        // Encoded as a JSON string — quote the raw value.
+        "google.protobuf.Timestamp"
+        | "google.protobuf.Duration"
+        | "google.protobuf.FieldMask"
+        | "google.protobuf.StringValue"
+        | "google.protobuf.BytesValue"
+        | "google.protobuf.Int64Value"
+        | "google.protobuf.UInt64Value" => Some(true),
+        // Encoded as a bare JSON number/bool — pass the raw value through.
+        "google.protobuf.BoolValue"
+        | "google.protobuf.Int32Value"
+        | "google.protobuf.UInt32Value"
+        | "google.protobuf.FloatValue"
+        | "google.protobuf.DoubleValue" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse `json` into the top-level field `name` and set it.
 fn set_message_field(msg: &mut DynamicMessage, name: &str, json: &[u8]) -> Result<(), TranscodeError> {
     let field = field_by_any_name(&msg.descriptor(), name)
         .ok_or_else(|| TranscodeError::Http(format!("unknown body field: {name}")))?;
-    match field.kind() {
-        Kind::Message(md) => {
-            let sub = deserialize_message(md, json)?;
-            msg.set_field(&field, Value::Message(sub));
-            Ok(())
-        }
-        _ => Err(TranscodeError::Http(format!("body field {name} must be a message"))),
-    }
+    // Any top-level field, not just a message: `body: "content"` on a `string` takes
+    // a JSON string, `body: "items"` on a repeated field takes an array. HttpRule
+    // requires only that the field be top-level.
+    let text = std::str::from_utf8(json)
+        .map_err(|_| TranscodeError::Http(format!("body field {name}: not valid UTF-8")))?;
+    set_from_json(msg, &field, text)
 }
 
 /// Set a (possibly nested, possibly repeated) scalar field from a string value.
@@ -448,6 +525,25 @@ fn set_by_path(msg: &mut DynamicMessage, path: &[String], raw: &str) -> Result<(
         .ok_or_else(|| TranscodeError::Http(format!("unknown field: {}", path[0])))?;
 
     if path.len() == 1 {
+        // Kinds with no scalar `Value` form bind through the JSON decoder instead:
+        // `bytes` (base64) and the string-shaped well-known types.
+        match field.kind() {
+            Kind::Bytes => {
+                return set_from_json(msg, &field, &serde_json::to_string(raw).unwrap());
+            }
+            Kind::Message(md) if !field.is_list() && !field.is_map() => {
+                return match wkt_json_shape(&md) {
+                    Some(true) => set_from_json(msg, &field, &serde_json::to_string(raw).unwrap()),
+                    Some(false) => set_from_json(msg, &field, raw),
+                    None => Err(TranscodeError::Http(format!(
+                        "cannot bind a path/query value to message field {} ({})",
+                        field.name(),
+                        md.full_name()
+                    ))),
+                };
+            }
+            _ => {}
+        }
         let value = coerce(&field, raw)?;
         if field.is_list() {
             if let Some(list) = msg.get_field_mut(&field).as_list_mut() {
@@ -493,7 +589,9 @@ fn coerce(field: &prost_reflect::FieldDescriptor, raw: &str) -> Result<Value, Tr
                 Value::EnumNumber(v.number())
             }
         }
-        Kind::Bytes => return Err(TranscodeError::Http("bytes fields cannot bind from path/query".into())),
+        // Unreachable: `set_by_path` routes these to the JSON decoder above. Kept
+        // so the match stays exhaustive over `Kind` rather than falling through.
+        Kind::Bytes => return Err(TranscodeError::Http("bytes must bind through the JSON decoder".into())),
         Kind::Message(_) => return Err(TranscodeError::Http("cannot bind a scalar to a message field".into())),
     })
 }
@@ -566,20 +664,33 @@ mod tests {
         assert_eq!(vars, vec![(vec!["id".to_string()], "urn:foo".to_string())]);
     }
 
-    /// A path pattern richer than a bare `*`/`**` — `{name=shelves/*}` — is split
-    /// on `/` before braces are examined, so it compiles to segments that match
-    /// nothing it was meant to. It fails closed, but silently; see
-    /// `doc/HTTPRULE_GAPS.md`.
+    /// A capture may span several segments — `{name=shelves/*/books/*}`, the
+    /// canonical Google resource-name shape. The captured value is everything the
+    /// sub-pattern consumed, joined by `/`. The Go router is pinned by the same
+    /// case (`httprule_test.go::TestMultiSegmentCapture`).
     #[test]
-    fn nested_path_patterns_are_unsupported() {
-        let (segments, _) = parse_template("/v1/{name=shelves/*/books/*}");
-        assert!(match_segments(&segments, "", "/v1/shelves/1/books/2").is_none());
-        assert!(match_segments(&segments, "", "/v1/anything").is_none());
-        assert_eq!(segments.len(), 5);
-        // The interior bare `*`s *are* wildcards — that much is supported — but the
-        // braces have already been split into literals nothing will ever match.
-        assert!(matches!(segments[1], Segment::Literal(ref l) if l == "{name=shelves"));
-        assert!(matches!(segments[2], Segment::AnyOne));
+    fn multi_segment_capture() {
+        let (segments, verb) = parse_template("/v1/{name=shelves/*/books/*}");
+        let vars = match_segments(&segments, &verb, "/v1/shelves/1/books/2").expect("should match");
+        assert_eq!(vars, vec![(vec!["name".to_string()], "shelves/1/books/2".to_string())]);
+
+        // The sub-pattern is a pattern, not a prefix: the shape has to line up.
+        assert_eq!(segments.len(), 2);
+        assert!(match_segments(&segments, &verb, "/v1/shelves/1/books").is_none());
+        assert!(match_segments(&segments, &verb, "/v1/shelves/1/books/2/3").is_none());
+        assert!(match_segments(&segments, &verb, "/v1/racks/1/books/2").is_none());
+
+        // A trailing `**` inside a capture takes the remainder.
+        let (segments, verb) = parse_template("/v1/{name=files/**}");
+        let vars = match_segments(&segments, &verb, "/v1/files/a/b/c.txt").expect("should match");
+        assert_eq!(vars, vec![(vec!["name".to_string()], "files/a/b/c.txt".to_string())]);
+
+        // A custom verb still binds after a multi-segment capture, which is only
+        // possible because the `:` split ignores colons inside braces.
+        let (segments, verb) = parse_template("/v1/{name=shelves/*}:archive");
+        assert_eq!(verb, "archive");
+        let vars = match_segments(&segments, &verb, "/v1/shelves/7:archive").expect("should match");
+        assert_eq!(vars, vec![(vec!["name".to_string()], "shelves/7".to_string())]);
     }
 
     /// Field names resolve by `.proto` name or by JSON (lowerCamelCase) name, since
@@ -601,6 +712,221 @@ mod tests {
         assert!(field_by_any_name(&desc, "additionalBindings").is_some());
         // A name that is neither still fails.
         assert!(field_by_any_name(&desc, "responseBodyy").is_none());
+    }
+
+    /// A synthetic message with the two kinds that bind through the JSON decoder
+    /// rather than through `coerce`: `bytes`, and a message field.
+    fn binder_fixture() -> MessageDescriptor {
+        use prost_reflect::prost_types::{
+            field_descriptor_proto::{Label, Type},
+            DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        };
+        let field = |name: &str, number: i32, ty: Type, type_name: Option<&str>| FieldDescriptorProto {
+            name: Some(name.to_string()),
+            number: Some(number),
+            label: Some(Label::Optional as i32),
+            r#type: Some(ty as i32),
+            type_name: type_name.map(str::to_string),
+            ..Default::default()
+        };
+        let file = FileDescriptorProto {
+            name: Some("binder_fixture.proto".to_string()),
+            package: Some("webnext.binder.test".to_string()),
+            syntax: Some("proto3".to_string()),
+            message_type: vec![
+                DescriptorProto {
+                    name: Some("Nested".to_string()),
+                    field: vec![field("id", 1, Type::String, None)],
+                    ..Default::default()
+                },
+                DescriptorProto {
+                    name: Some("Req".to_string()),
+                    field: vec![
+                        field("blob", 1, Type::Bytes, None),
+                        field("nested", 2, Type::Message, Some(".webnext.binder.test.Nested")),
+                    ],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        DescriptorPool::from_file_descriptor_set(FileDescriptorSet { file: vec![file] })
+            .expect("build fixture pool")
+            .get_message_by_name("webnext.binder.test.Req")
+            .expect("Req")
+    }
+
+    /// `custom { kind: "*" }` means "leave the HTTP method unspecified for this
+    /// rule", so the binding answers every verb rather than a literal `*`. Go is
+    /// pinned by the same case (`TestCustomKindStarMatchesAnyVerb`).
+    #[test]
+    fn custom_kind_star_matches_any_verb() {
+        let mut bindings = Vec::new();
+        let input = binder_fixture();
+        // `push_binding` takes the rule as a DynamicMessage, so build one: a
+        // `custom` pattern whose kind is `*`.
+        let pool = DescriptorPool::decode(testecho::FILE_DESCRIPTOR_SET).expect("descriptor set");
+        let rule_desc = pool.get_message_by_name("google.api.HttpRule").expect("HttpRule");
+        let custom_desc = pool.get_message_by_name("google.api.CustomHttpPattern").expect("custom");
+        let mut custom = DynamicMessage::new(custom_desc);
+        custom.set_field_by_name("kind", Value::String("*".into()));
+        custom.set_field_by_name("path", Value::String("/v1/any".into()));
+        let mut rule = DynamicMessage::new(rule_desc);
+        rule.set_field_by_name("custom", Value::Message(custom));
+
+        push_binding(&mut bindings, &rule, "/test.Svc/Any", &input);
+        let router = HttpRouter { bindings };
+
+        for verb in ["GET", "POST", "DELETE", "PATCH"] {
+            assert!(router.match_request(verb, "/v1/any").is_some(), "{verb} should match");
+        }
+        // It is still a route, not a catch-all: the path must match.
+        assert!(router.match_request("GET", "/v1/other").is_none());
+    }
+
+    /// A pool containing the well-known types a REST URL realistically carries.
+    /// They are declared by hand (each is tiny) because prost-reflect keys its
+    /// protobuf-JSON handling off the *full name*, so a faithful declaration is all
+    /// it needs — and a synthetic pool keeps this test free of a codegen dependency.
+    fn wkt_fixture() -> MessageDescriptor {
+        use prost_reflect::prost_types::{
+            field_descriptor_proto::{Label, Type},
+            DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        };
+        let f = |name: &str, number: i32, ty: Type, label: Label, type_name: Option<&str>| {
+            FieldDescriptorProto {
+                name: Some(name.to_string()),
+                number: Some(number),
+                label: Some(label as i32),
+                r#type: Some(ty as i32),
+                type_name: type_name.map(str::to_string),
+                ..Default::default()
+            }
+        };
+        let wkt = |file: &str, msg: &str, fields: Vec<FieldDescriptorProto>| FileDescriptorProto {
+            name: Some(file.to_string()),
+            package: Some("google.protobuf".to_string()),
+            syntax: Some("proto3".to_string()),
+            message_type: vec![DescriptorProto {
+                name: Some(msg.to_string()),
+                field: fields,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let files = vec![
+            wkt("google/protobuf/field_mask.proto", "FieldMask",
+                vec![f("paths", 1, Type::String, Label::Repeated, None)]),
+            wkt("google/protobuf/duration.proto", "Duration",
+                vec![f("seconds", 1, Type::Int64, Label::Optional, None),
+                     f("nanos", 2, Type::Int32, Label::Optional, None)]),
+            wkt("google/protobuf/timestamp.proto", "Timestamp",
+                vec![f("seconds", 1, Type::Int64, Label::Optional, None),
+                     f("nanos", 2, Type::Int32, Label::Optional, None)]),
+            wkt("google/protobuf/wrappers.proto", "StringValue",
+                vec![f("value", 1, Type::String, Label::Optional, None)]),
+            FileDescriptorProto {
+                name: Some("wkt_fixture.proto".to_string()),
+                package: Some("webnext.wkt.test".to_string()),
+                syntax: Some("proto3".to_string()),
+                dependency: vec![
+                    "google/protobuf/field_mask.proto".to_string(),
+                    "google/protobuf/duration.proto".to_string(),
+                    "google/protobuf/timestamp.proto".to_string(),
+                    "google/protobuf/wrappers.proto".to_string(),
+                ],
+                message_type: vec![DescriptorProto {
+                    name: Some("Req".to_string()),
+                    field: vec![
+                        f("mask", 1, Type::Message, Label::Optional, Some(".google.protobuf.FieldMask")),
+                        f("ttl", 2, Type::Message, Label::Optional, Some(".google.protobuf.Duration")),
+                        f("at", 3, Type::Message, Label::Optional, Some(".google.protobuf.Timestamp")),
+                        f("note", 4, Type::Message, Label::Optional, Some(".google.protobuf.StringValue")),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ];
+        DescriptorPool::from_file_descriptor_set(FileDescriptorSet { file: files })
+            .expect("build wkt pool")
+            .get_message_by_name("webnext.wkt.test.Req")
+            .expect("Req")
+    }
+
+    /// The well-known types a REST URL carries bind from a query param, spelled the
+    /// way protobuf-JSON spells them — `?update_mask=a,b` being the canonical case.
+    /// Go is pinned by `TestQueryBindsWellKnownTypes`. This lives in unit tests
+    /// rather than the conformance matrix on purpose: see the note in
+    /// `conformance/proto/conformance.proto`.
+    #[test]
+    fn well_known_types_bind_from_a_query() {
+        let desc = wkt_fixture();
+        for (field, raw) in [
+            ("mask", "a,b.c"),
+            ("ttl", "3.500s"),
+            ("at", "2026-01-01T00:00:00Z"),
+            ("note", "hi"),
+        ] {
+            let mut msg = DynamicMessage::new(desc.clone());
+            set_by_path(&mut msg, &[field.to_string()], raw).unwrap_or_else(|e| panic!("{field}={raw}: {e}"));
+            // Round-trip through the encoder: the value must come back as the same
+            // canonical spelling it went in as.
+            let json = serde_json::to_string(&msg.transcode_to_dynamic()).expect("encode");
+            assert!(json.contains(raw), "{field}={raw} round-tripped as {json}");
+        }
+
+        // A malformed value is an error, not a silent default.
+        let mut msg = DynamicMessage::new(desc);
+        assert!(set_by_path(&mut msg, &["at".to_string()], "not-a-timestamp").is_err());
+    }
+
+    /// `bytes` binds from a URL through the *JSON decoder*, so it is spelled exactly
+    /// as protobuf-JSON spells it — base64 — rather than guessed at. An arbitrary
+    /// submessage is still refused. Go is pinned by the same cases
+    /// (`TestQueryBindsWellKnownTypes{,ButNotArbitraryMessages}`).
+    #[test]
+    fn bytes_binds_from_a_url_and_arbitrary_messages_do_not() {
+        let desc = binder_fixture();
+
+        let mut msg = DynamicMessage::new(desc.clone());
+        set_by_path(&mut msg, &["blob".to_string()], "AQID").expect("base64 binds");
+        let field = desc.get_field_by_name("blob").unwrap();
+        assert_eq!(msg.get_field(&field).as_bytes().unwrap().as_ref(), &[1u8, 2, 3]);
+
+        let mut msg = DynamicMessage::new(desc.clone());
+        assert!(set_by_path(&mut msg, &["blob".to_string()], "!!!").is_err(), "malformed base64");
+
+        // An arbitrary submessage cannot come from a query param, and the error names
+        // the type it refused.
+        let mut msg = DynamicMessage::new(desc);
+        let err = set_by_path(&mut msg, &["nested".to_string()], "{}").unwrap_err();
+        assert!(format!("{err}").contains("Nested"), "{err}");
+        // The supported spelling for the same intent:
+        let mut msg = DynamicMessage::new(binder_fixture());
+        set_by_path(&mut msg, &["nested".to_string(), "id".to_string()], "x").expect("dotted binds");
+    }
+
+    /// `body: "<field>"` may name ANY top-level field, not only a singular message —
+    /// HttpRule requires only that it be top-level, which is also why a dotted body
+    /// path stays refused.
+    #[test]
+    fn body_may_name_any_top_level_field() {
+        let desc = binder_fixture();
+
+        let mut msg = DynamicMessage::new(desc.clone());
+        set_message_field(&mut msg, "blob", br#""AQID""#).expect("scalar body field");
+        let field = desc.get_field_by_name("blob").unwrap();
+        assert_eq!(msg.get_field(&field).as_bytes().unwrap().as_ref(), &[1u8, 2, 3]);
+
+        let mut msg = DynamicMessage::new(desc.clone());
+        set_message_field(&mut msg, "nested", br#"{"id":"inner"}"#).expect("message body field");
+
+        // A dotted path is not a top-level field, so it stays refused — by the spec,
+        // not by omission.
+        let mut msg = DynamicMessage::new(desc);
+        assert!(set_message_field(&mut msg, "nested.id", br#""x""#).is_err());
     }
 
     /// Bare `*` and `**` — the HttpRule grammar's unnamed wildcards — match without

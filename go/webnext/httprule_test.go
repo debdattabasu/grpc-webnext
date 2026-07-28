@@ -9,17 +9,29 @@
 package webnext
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/grpc-webnext/grpc-webnext/go/internal/protoset"
 	testechopb "github.com/grpc-webnext/grpc-webnext/go/internal/testecho/testechopb"
 
 	"google.golang.org/genproto/googleapis/api/annotations"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	// Registered so the well-known-type fixture below can resolve its imports.
+	// Production pools get these from the user's own descriptor set, which
+	// `protoc --include_imports` carries.
+	_ "google.golang.org/protobuf/types/known/durationpb"
+	_ "google.golang.org/protobuf/types/known/fieldmaskpb"
+	_ "google.golang.org/protobuf/types/known/timestamppb"
+	_ "google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // --- fixture ----------------------------------------------------------------
@@ -117,50 +129,72 @@ func str(msg protoreflect.Message, name string) string {
 // --- path templates ----------------------------------------------------------
 
 func TestParseTemplate(t *testing.T) {
+	// A capture is `{field=<sub-pattern>}`; `{f}` is sugar for `{f=*}`. The table
+	// checks the segment kinds plus, for captures, the field path and the shape of
+	// the sub-pattern — which is what distinguishes `{f}` from `{f=**}` now that
+	// both are the same kind.
 	cases := []struct {
 		template string
-		want     []segment
+		kinds    []segmentKind
+		fields   [][]string // captures only, in order
+		subKinds [][]segmentKind
 	}{
-		{"/v1/echo", []segment{{kind: segLiteral, literal: "v1"}, {kind: segLiteral, literal: "echo"}}},
-		{"/v1/echo/{message}", []segment{
-			{kind: segLiteral, literal: "v1"},
-			{kind: segLiteral, literal: "echo"},
-			{kind: segSingle, field: []string{"message"}},
-		}},
-		// `{f=*}` is the explicit spelling of `{f}`.
-		{"/v1/{a=*}", []segment{{kind: segLiteral, literal: "v1"}, {kind: segSingle, field: []string{"a"}}}},
-		{"/v1/{a=**}", []segment{{kind: segLiteral, literal: "v1"}, {kind: segRest, field: []string{"a"}}}},
+		{"/v1/echo", []segmentKind{segLiteral, segLiteral}, nil, nil},
+		{"/v1/echo/{message}",
+			[]segmentKind{segLiteral, segLiteral, segCapture},
+			[][]string{{"message"}},
+			[][]segmentKind{{segAnyOne}}},
+		{"/v1/{a=*}", []segmentKind{segLiteral, segCapture}, [][]string{{"a"}}, [][]segmentKind{{segAnyOne}}},
+		{"/v1/{a=**}", []segmentKind{segLiteral, segCapture}, [][]string{{"a"}}, [][]segmentKind{{segAnyRest}}},
 		// A dotted capture binds a nested field.
-		{"/v1/{user.id}", []segment{{kind: segLiteral, literal: "v1"}, {kind: segSingle, field: []string{"user", "id"}}}},
+		{"/v1/{user.id}", []segmentKind{segLiteral, segCapture}, [][]string{{"user", "id"}}, [][]segmentKind{{segAnyOne}}},
+		// A multi-segment sub-pattern survives the split, which is the whole point.
+		{"/v1/{name=shelves/*/books/*}",
+			[]segmentKind{segLiteral, segCapture},
+			[][]string{{"name"}},
+			[][]segmentKind{{segLiteral, segAnyOne, segLiteral, segAnyOne}}},
 		// A trailing `:verb` is not part of the path.
-		{"/v1/things/{id}:cancel", []segment{
-			{kind: segLiteral, literal: "v1"},
-			{kind: segLiteral, literal: "things"},
-			{kind: segSingle, field: []string{"id"}},
-		}},
-		// Redundant slashes collapse.
-		{"//v1//echo//", []segment{{kind: segLiteral, literal: "v1"}, {kind: segLiteral, literal: "echo"}}},
+		{"/v1/things/{id}:cancel",
+			[]segmentKind{segLiteral, segLiteral, segCapture},
+			[][]string{{"id"}},
+			[][]segmentKind{{segAnyOne}}},
+		// Bare wildcards, and redundant slashes collapsing.
+		{"/v1/*/things/**", []segmentKind{segLiteral, segAnyOne, segLiteral, segAnyRest}, nil, nil},
+		{"//v1//echo//", []segmentKind{segLiteral, segLiteral}, nil, nil},
 	}
 	for _, tc := range cases {
 		got, _ := parseTemplate(tc.template)
-		if len(got) != len(tc.want) {
-			t.Errorf("%q: %d segments, want %d (%+v)", tc.template, len(got), len(tc.want), got)
+		if len(got) != len(tc.kinds) {
+			t.Errorf("%q: %d segments, want %d (%+v)", tc.template, len(got), len(tc.kinds), got)
 			continue
 		}
-		for i := range got {
-			if got[i].kind != tc.want[i].kind || got[i].literal != tc.want[i].literal {
-				t.Errorf("%q segment %d = %+v, want %+v", tc.template, i, got[i], tc.want[i])
+		var captures int
+		for i, seg := range got {
+			if seg.kind != tc.kinds[i] {
+				t.Errorf("%q segment %d kind = %v, want %v", tc.template, i, seg.kind, tc.kinds[i])
 				continue
 			}
-			if len(got[i].field) != len(tc.want[i].field) {
-				t.Errorf("%q segment %d field = %v, want %v", tc.template, i, got[i].field, tc.want[i].field)
+			if seg.kind != segCapture {
 				continue
 			}
-			for j := range got[i].field {
-				if got[i].field[j] != tc.want[i].field[j] {
-					t.Errorf("%q segment %d field = %v, want %v", tc.template, i, got[i].field, tc.want[i].field)
+			if captures >= len(tc.fields) {
+				t.Errorf("%q: more captures than expected", tc.template)
+				break
+			}
+			if strings.Join(seg.field, ".") != strings.Join(tc.fields[captures], ".") {
+				t.Errorf("%q capture %d field = %v, want %v", tc.template, captures, seg.field, tc.fields[captures])
+			}
+			want := tc.subKinds[captures]
+			if len(seg.sub) != len(want) {
+				t.Errorf("%q capture %d sub = %+v, want %d segments", tc.template, captures, seg.sub, len(want))
+			} else {
+				for j := range seg.sub {
+					if seg.sub[j].kind != want[j] {
+						t.Errorf("%q capture %d sub[%d] = %v, want %v", tc.template, captures, j, seg.sub[j].kind, want[j])
+					}
 				}
 			}
+			captures++
 		}
 	}
 }
@@ -360,9 +394,8 @@ func TestBindingErrors(t *testing.T) {
 		{"negative uint32", newBinding("/v1/things", bodyNone), "/v1/things", "count=-1", ""},
 		{"non-boolean bool", newBinding("/v1/things", bodyNone), "/v1/things", "flag=yes", ""},
 		{"unknown enum value", newBinding("/v1/things", bodyNone), "/v1/things", "color=MAUVE", ""},
-		// Bytes have no unambiguous path/query spelling, so binding one is refused
-		// rather than guessed at (base64? raw? percent-decoded?).
-		{"bytes from query", newBinding("/v1/things", bodyNone), "/v1/things", "blob=AQID", ""},
+		// Bytes DO bind now (base64), so the error case is malformed base64.
+		{"malformed base64 bytes", newBinding("/v1/things", bodyNone), "/v1/things", "blob=!!!", ""},
 		// A scalar cannot land on a message field, nor a dotted path traverse a scalar.
 		{"scalar onto message", newBinding("/v1/{nested}", bodyNone), "/v1/x", "", ""},
 		{"path through a scalar", newBinding("/v1/{name.more}", bodyNone), "/v1/x", "", ""},
@@ -428,6 +461,11 @@ func TestRouterCompilesVerbs(t *testing.T) {
 		{&annotations.HttpRule{Pattern: &annotations.HttpRule_Custom{
 			Custom: &annotations.CustomHttpPattern{Kind: "watch", Path: "/v1/a"},
 		}}, "WATCH", "/v1/a"},
+		// `*` is HttpRule's "any HTTP method", not a literal verb — see
+		// TestCustomKindStarMatchesAnyVerb.
+		{&annotations.HttpRule{Pattern: &annotations.HttpRule_Custom{
+			Custom: &annotations.CustomHttpPattern{Kind: "*", Path: "/v1/a"},
+		}}, "*", "/v1/a"},
 	}
 	for _, tc := range cases {
 		got := compile(t, tc.rule)
@@ -485,62 +523,40 @@ func TestRouterCompilesAdditionalBindings(t *testing.T) {
 // features doc/HTTPRULE_GAPS.md lists as unsupported, so the gaps are visible
 // and a future implementation has a test that must change.
 
-// A path pattern richer than a bare `*`/`**` — e.g. `{name=shelves/*/books/*}`,
-// which the HttpRule spec allows — is not merely approximated: the template is
-// split on `/` *before* braces are examined, so `{name=shelves` and `*}` become
-// literal segments and the binding matches NOTHING it was meant to.
-//
-// This is the sharpest of the gaps: it fails closed (a dead route) rather than
-// mis-binding, but it fails silently at compile time. Rust splits in the same
-// order and behaves identically, so the two implementations agree — see
-// doc/HTTPRULE_GAPS.md.
-func TestUnsupportedNestedPathPattern(t *testing.T) {
-	segments := tmpl("/v1/{name=shelves/*/books/*}")
+// A capture may span several segments — `{name=shelves/*/books/*}`, the canonical
+// Google resource-name shape. The captured value is everything the sub-pattern
+// consumed, joined by `/`. Rust is pinned by the same case
+// (`httprule.rs::tests::multi_segment_capture`).
+func TestMultiSegmentCapture(t *testing.T) {
+	segments, verb := parseTemplate("/v1/{name=shelves/*/books/*}")
+	vars, ok := matchSegments(segments, verb, "/v1/shelves/1/books/2")
+	if !ok || len(vars) != 1 || vars[0].value != "shelves/1/books/2" {
+		t.Fatalf("captured %+v (ok=%v), want name=shelves/1/books/2", vars, ok)
+	}
 
-	if _, ok := matchSegments(segments, "", "/v1/shelves/1/books/2"); ok {
-		t.Error("nested path patterns are unsupported; the intended URL unexpectedly matched — " +
-			"if support was added, update doc/HTTPRULE_GAPS.md and this test")
-	}
-	// Nor does it degrade into a single-segment capture.
-	if _, ok := matchSegments(segments, "", "/v1/anything"); ok {
-		t.Error("nested pattern unexpectedly matched a single segment")
-	}
-	// What it compiles to: five segments, none of them the intended capture. The
-	// interior bare `*`s ARE wildcards (that is supported), but the braces have
-	// already been split apart into literals that nothing will ever match.
-	if len(segments) != 5 {
-		t.Fatalf("got %d segments, want 5 (%+v)", len(segments), segments)
-	}
-	for _, i := range []int{0, 1, 3, 4} {
-		if segments[i].kind != segLiteral {
-			t.Errorf("segment %d is %v, want a literal", i, segments[i].kind)
+	// The sub-pattern is a pattern, not a prefix: the shape has to line up.
+	for _, path := range []string{"/v1/shelves/1/books", "/v1/shelves/1/books/2/3", "/v1/racks/1/books/2"} {
+		if _, ok := matchSegments(segments, verb, path); ok {
+			t.Errorf("%s should not match /v1/{name=shelves/*/books/*}", path)
 		}
 	}
-	if segments[2].kind != segAnyOne {
-		t.Errorf("segment 2 is %v, want a bare wildcard", segments[2].kind)
-	}
-	// The give-away: `{name=shelves` became a literal nobody can match.
-	if segments[1].literal != "{name=shelves" {
-		t.Errorf("segment 1 literal = %q, want the split-apart brace", segments[1].literal)
-	}
-}
 
-// `response_body` is accepted and silently ignored: the binding compiles as if
-// it were absent, so the whole response message comes back rather than the named
-// sub-field. Ignoring it is a *wrong answer*, not a missing route — the loudest
-// of the gaps in consequence, the quietest in symptom.
-func TestUnsupportedResponseBody(t *testing.T) {
-	got := compile(t, &annotations.HttpRule{
-		Pattern:      &annotations.HttpRule_Get{Get: "/v1/things/{name}"},
-		ResponseBody: "nested",
-	})
-	if len(got) != 1 {
-		t.Fatalf("got %d bindings, want 1", len(got))
+	// A trailing `**` inside a capture takes the remainder.
+	segments, verb = parseTemplate("/v1/{name=files/**}")
+	vars, ok = matchSegments(segments, verb, "/v1/files/a/b/c.txt")
+	if !ok || len(vars) != 1 || vars[0].value != "files/a/b/c.txt" {
+		t.Errorf("captured %+v (ok=%v), want name=files/a/b/c.txt", vars, ok)
 	}
-	// Nothing in the compiled binding records it. If a `responseBody` member is
-	// ever added, this test must change — and so must doc/HTTPRULE_GAPS.md.
-	if got[0].httpMethod != "GET" || got[0].body != bodyNone {
-		t.Errorf("binding = %s body %v, want GET none", got[0].httpMethod, got[0].body)
+
+	// A custom verb still binds after a multi-segment capture, which is only
+	// possible because the `:` split ignores colons inside braces.
+	segments, verb = parseTemplate("/v1/{name=shelves/*}:archive")
+	if verb != "archive" {
+		t.Fatalf("custom verb = %q, want archive", verb)
+	}
+	vars, ok = matchSegments(segments, verb, "/v1/shelves/7:archive")
+	if !ok || len(vars) != 1 || vars[0].value != "shelves/7" {
+		t.Errorf("captured %+v (ok=%v), want name=shelves/7", vars, ok)
 	}
 }
 
@@ -567,30 +583,164 @@ func TestUnsupportedNestedAdditionalBindings(t *testing.T) {
 	}
 }
 
-// A repeated field cannot be filled from a JSON body via `body: "<field>"`:
-// the body must name a singular message field.
-func TestUnsupportedRepeatedBodyField(t *testing.T) {
+// `body: "<field>"` may name ANY top-level field, not only a singular message:
+// HttpRule requires only that the field be top-level. The JSON decoder does the
+// work, so each shape is spelled exactly as protobuf-JSON spells it.
+func TestBodyMayNameAnyTopLevelField(t *testing.T) {
 	input := fixtureMessage(t)
+
+	// A scalar field takes that scalar's JSON.
 	msg := dynamicpb.NewMessage(input)
-	if err := setMessageField(msg, "tags", []byte(`["a","b"]`)); err == nil {
-		t.Error("expected repeated body fields to be refused; if support was added, " +
-			"update doc/HTTPRULE_GAPS.md and this test")
+	if err := setMessageField(msg, "name", []byte(`"hello"`)); err != nil {
+		t.Fatalf("scalar body field: %v", err)
+	}
+	if got := str(msg, "name"); got != "hello" {
+		t.Errorf("name = %q, want hello", got)
+	}
+
+	// A repeated field takes an array.
+	msg = dynamicpb.NewMessage(input)
+	if err := setMessageField(msg, "tags", []byte(`["a","b"]`)); err != nil {
+		t.Fatalf("repeated body field: %v", err)
+	}
+	list := msg.Get(input.Fields().ByName("tags")).List()
+	if list.Len() != 2 || list.Get(0).String() != "a" || list.Get(1).String() != "b" {
+		t.Errorf("tags = %v, want [a b]", list)
+	}
+
+	// A message field still takes an object, as before.
+	msg = dynamicpb.NewMessage(input)
+	if err := setMessageField(msg, "nested", []byte(`{"id":"inner"}`)); err != nil {
+		t.Fatalf("message body field: %v", err)
+	}
+	if got := str(msg.Get(input.Fields().ByName("nested")).Message(), "id"); got != "inner" {
+		t.Errorf("nested.id = %q, want inner", got)
+	}
+
+	// A dotted path is NOT a top-level field, and the HttpRule spec says the
+	// referred field must be one — so this stays refused, by the spec, not by
+	// omission.
+	msg = dynamicpb.NewMessage(input)
+	if err := setMessageField(msg, "nested.id", []byte(`"x"`)); err == nil {
+		t.Error("a dotted body path should be refused: HttpRule requires a top-level field")
 	}
 }
 
-// Non-scalar query binding: a query param cannot carry a JSON message for a
-// message-typed field — only its scalar leaves, via a dotted key.
-func TestUnsupportedNonScalarQueryBinding(t *testing.T) {
+// A query param cannot carry an arbitrary submessage — but the well-known types
+// that a REST URL realistically carries have a canonical string form, and those
+// bind through the JSON decoder rather than a hand-rolled parser.
+func TestQueryBindsWellKnownTypesButNotArbitraryMessages(t *testing.T) {
 	input := fixtureMessage(t)
+
+	// An arbitrary message is still refused, and says which type it refused.
 	msg := dynamicpb.NewMessage(input)
-	if err := setByPath(msg, []string{"nested"}, `{"id":"x"}`); err == nil {
-		t.Error("expected message-typed query binding to be refused; if support was added, " +
-			"update doc/HTTPRULE_GAPS.md and this test")
+	err := setByPath(msg, []string{"nested"}, `{"id":"x"}`)
+	if err == nil {
+		t.Fatal("binding an arbitrary message from a query should be refused")
+	}
+	if !strings.Contains(err.Error(), "Nested") {
+		t.Errorf("error %q should name the offending message type", err)
 	}
 	// The supported spelling for the same intent:
 	if err := setByPath(msg, []string{"nested", "id"}, "x"); err != nil {
 		t.Errorf("dotted scalar binding should work: %v", err)
 	}
+
+	// `bytes` binds as base64 — protobuf-JSON's spelling, so no guessing.
+	msg = dynamicpb.NewMessage(input)
+	if err := setByPath(msg, []string{"blob"}, "AQID"); err != nil {
+		t.Fatalf("bytes from query: %v", err)
+	}
+	if got := msg.Get(input.Fields().ByName("blob")).Bytes(); string(got) != "\x01\x02\x03" {
+		t.Errorf("blob = %v, want [1 2 3]", got)
+	}
+	if err := setByPath(msg, []string{"blob"}, "!!!"); err == nil {
+		t.Error("malformed base64 should be refused")
+	}
+}
+
+// The well-known types themselves, which need a descriptor pool that has them.
+// `?update_mask=a,b` is the canonical case and the one most likely to be hit.
+func TestQueryBindsWellKnownTypes(t *testing.T) {
+	md := wktFixture(t)
+	fields := md.Fields()
+
+	cases := []struct{ field, raw, want string }{
+		{"mask", "a,b.c", "a,b.c"},
+		{"ttl", "3.500s", "3.500s"},
+		{"at", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"},
+		{"note", "hi", `"hi"`},
+		{"count", "7", "7"},
+		{"on", "true", "true"},
+	}
+	for _, tc := range cases {
+		msg := dynamicpb.NewMessage(md)
+		if err := setByPath(msg, []string{tc.field}, tc.raw); err != nil {
+			t.Errorf("%s=%q: %v", tc.field, tc.raw, err)
+			continue
+		}
+		// Round-trip through protojson: the value must come back as the same
+		// canonical spelling it went in as.
+		encoded, err := (protojson.MarshalOptions{}).Marshal(msg)
+		if err != nil {
+			t.Errorf("%s: marshal: %v", tc.field, err)
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &obj); err != nil {
+			t.Fatalf("%s: %v", tc.field, err)
+		}
+		got := strings.Trim(string(obj[fields.ByName(protoreflect.Name(tc.field)).JSONName()]), `"`)
+		if want := strings.Trim(tc.want, `"`); got != want {
+			t.Errorf("%s=%q round-tripped as %q, want %q", tc.field, tc.raw, got, want)
+		}
+	}
+
+	// A malformed value for a well-known type is an error, not a silent default.
+	msg := dynamicpb.NewMessage(md)
+	if err := setByPath(msg, []string{"at"}, "not-a-timestamp"); err == nil {
+		t.Error("a malformed Timestamp should be refused")
+	}
+}
+
+// wktFixture is a message with one field per well-known type a URL can carry.
+func wktFixture(t *testing.T) protoreflect.MessageDescriptor {
+	t.Helper()
+	optional := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	msgKind := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
+	field := func(name string, number int32, typeName string) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(number),
+			Label: &optional, Type: &msgKind, TypeName: proto.String(typeName),
+		}
+	}
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("wkt_fixture.proto"),
+		Package: proto.String("webnext.wkt.test"),
+		Syntax:  proto.String("proto3"),
+		Dependency: []string{
+			"google/protobuf/field_mask.proto",
+			"google/protobuf/duration.proto",
+			"google/protobuf/timestamp.proto",
+			"google/protobuf/wrappers.proto",
+		},
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("Req"),
+			Field: []*descriptorpb.FieldDescriptorProto{
+				field("mask", 1, ".google.protobuf.FieldMask"),
+				field("ttl", 2, ".google.protobuf.Duration"),
+				field("at", 3, ".google.protobuf.Timestamp"),
+				field("note", 4, ".google.protobuf.StringValue"),
+				field("count", 5, ".google.protobuf.Int32Value"),
+				field("on", 6, ".google.protobuf.BoolValue"),
+			},
+		}},
+	}
+	fd, err := protodesc.NewFile(fdp, protoregistry.GlobalFiles)
+	if err != nil {
+		t.Fatalf("build wkt fixture: %v", err)
+	}
+	return fd.Messages().ByName("Req")
 }
 
 // Path captures and query keys resolve by `.proto` name OR by JSON
@@ -749,4 +899,24 @@ func dynamicResponse(t *testing.T, tc *Transcoder, method, message string) *dyna
 // response types (the synthetic fixture above has no service to key a method on).
 func testechoDescriptorSet() ([]byte, error) {
 	return protoset.Marshal(testechopb.File_echo_proto)
+}
+
+// `custom { kind: "*" }` means "leave the HTTP method unspecified for this rule",
+// so the binding answers every verb rather than a literal `*`. Rust is pinned by
+// the same case (`httprule.rs::tests::custom_kind_star_matches_any_verb`).
+func TestCustomKindStarMatchesAnyVerb(t *testing.T) {
+	r := &httpRouter{}
+	r.collect(&annotations.HttpRule{Pattern: &annotations.HttpRule_Custom{
+		Custom: &annotations.CustomHttpPattern{Kind: "*", Path: "/v1/any"},
+	}}, "/test.Svc/Any", fixtureMessage(t))
+
+	for _, verb := range []string{"GET", "POST", "DELETE", "PATCH"} {
+		if _, _, ok := r.matchRequest(verb, "/v1/any"); !ok {
+			t.Errorf("%s /v1/any should match a `custom { kind: \"*\" }` binding", verb)
+		}
+	}
+	// It is still a route, not a catch-all: the path must match.
+	if _, _, ok := r.matchRequest("GET", "/v1/other"); ok {
+		t.Error("a wildcard-method binding must still match on its path")
+	}
 }
