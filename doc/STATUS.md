@@ -1,5 +1,19 @@
 # Protocol conformance status
 
+> **Note (2026-07-28):** a **fourth** shared bug, found by CI rather than by an audit —
+> and only on Linux. Both servers sent the `4000 + code` rejection close and then dropped
+> the socket without reading the peer out. But a client sends the moment the handshake
+> completes, so at rejection time a frame is normally already in flight, and closing a
+> socket with bytes still queued makes the OS answer with an **RST** — which tells the
+> peer's kernel to discard its receive buffer, close frame included. The client then saw a
+> bare `1006` and reported `UNAVAILABLE` instead of the status the close was carrying,
+> defeating the whole point of the private code. Both servers now drain first (the rule is
+> normative in `PROTOCOL.md` under "Single-stream teardown"), pinned by
+> `ws_rejection_drains_before_closing` / `TestWSRejectionDoesNotCloseWhilePeerMayWrite`.
+> Worth noting what caught it: the REST conformance case that exercises this is the only
+> one whose driver *writes immediately after opening*, which is what a real browser client
+> does — and it reproduces on macOS only through a raw socket that delays its first read.
+
 > **Note (2026-07-27):** the **Go** in-process server is implemented and joined the
 > conformance matrix, which now runs every case against both server implementations.
 > Writing the second implementation surfaced two real Rust bugs — `-bin` metadata dropped

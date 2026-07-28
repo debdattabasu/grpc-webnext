@@ -307,6 +307,15 @@ close before dropping the socket. The handshake is politeness — the status was
 delivered in the terminal frame — so a client that never answers cannot pin the connection
 open (and, during a drain, cannot hold shutdown open with it).
 
+**A server MUST keep reading until then, including after a `4000 + code` handshake
+rejection.** This is not politeness: a client sends as soon as the handshake completes, so
+at rejection time a frame is usually already in flight, and closing a socket with bytes
+still queued makes the OS answer with an RST. An RST makes the peer discard its receive
+buffer *including a close frame it has not yet parsed* — the client then sees a bare `1006`
+and reports `UNAVAILABLE` instead of the status the close was carrying, which is the whole
+point of the private code. Whatever arrives during that window is discarded; the connection
+is already refused.
+
 **Draining.** A server shutting down refuses *new* RPCs without cutting live ones. Because a
 socket carries exactly one stream, that distinction is per-socket: one that has **not yet
 opened its stream** is closed with **`1001 Going Away`**, and one carrying a live stream is

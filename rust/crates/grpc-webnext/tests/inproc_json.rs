@@ -343,6 +343,46 @@ async fn ws_rejects_missing_codec_subprotocol_by_default() {
 }
 
 #[tokio::test]
+async fn ws_rejection_drains_before_closing() {
+    // A rejection must not close the socket while the peer may still be writing.
+    //
+    // Every client sends the moment the handshake completes — a browser's `onopen` fires as
+    // soon as the 101 lands — so when the server rejects, a frame is usually already in
+    // flight. Closing a socket that still has unread bytes queued makes the OS answer with an
+    // RST, and an RST tells the peer's kernel to discard its receive buffer *including the
+    // close frame it had not yet parsed*: the client then sees a bare 1006 and reports
+    // UNAVAILABLE instead of the status the close was carrying, which defeats the entire
+    // point of the private close code. So the server reads the peer out first, exactly as
+    // normal teardown does.
+    //
+    // Asserting that directly (write, then race the reset) would only reproduce about half
+    // the time. This asserts the property underneath it: once the rejection close has been
+    // read, the TCP connection is still open. Go: TestWSRejectionDoesNotCloseWhilePeerMayWrite.
+    use tokio::io::AsyncReadExt;
+
+    let base = start_json_server().await;
+    let url = base.replacen("http", "ws", 1);
+    let mut ws = ws_connect(&url, None).await;
+    while let Some(msg) = ws.next().await {
+        if matches!(msg.unwrap(), TungMessage::Close(_)) {
+            break;
+        }
+    }
+
+    // Stop polling here, so tungstenite never flushes its answering close: with no echo
+    // sent, the only thing that can end this read is the server closing the socket — which
+    // is the bug. Watching the socket rather than the WebSocket also sidesteps tungstenite
+    // reporting a completed close as a clean end-of-stream either way.
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(std::time::Duration::from_millis(300), ws.get_mut().read(&mut byte)).await;
+    assert!(
+        read.is_err(),
+        "after the rejection close the server closed the socket ({read:?}); it must drain the \
+         peer first, or an in-flight client frame turns the close into an RST"
+    );
+}
+
+#[tokio::test]
 async fn transcode_get_binds_path_param() {
     // GET /v1/echo/{message} -> Unary, binding `message` from the path.
     let base = start_json_server().await;

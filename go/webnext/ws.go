@@ -12,6 +12,7 @@ package webnext
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -636,8 +637,32 @@ func sendReset(c *wsConn, jsonCodec bool, code codes.Code, message string) {
 // closeWithStatus rejects a connection at the handshake with a private close
 // code carrying the gRPC status (4000 + code), readable from browser JS. Used
 // only for connection-level rejections, never for per-stream errors.
+//
+// It then reads the peer out before returning to the caller's conn.Close(),
+// exactly as the normal teardown path does. A client opens and sends
+// immediately — a browser's `onopen` fires the moment the 101 lands — so by now
+// there is very likely a frame in flight. Closing a socket that still has unread
+// bytes queued makes the OS answer with an RST, and an RST tells the peer's
+// kernel to discard its receive buffer *including the close frame it had not yet
+// parsed*. The client would then see a bare 1006 and report UNAVAILABLE instead
+// of the status this close was carrying, which is the whole point of the private
+// code.
 func closeWithStatus(conn *websocket.Conn, code codes.Code, message string) {
 	_ = conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(WSCloseCode(code), truncateUTF8(message, maxCloseReason)),
 		time.Now().Add(wsCloseGrace))
+	conn.SetReadLimit(wsReadLimit)
+	_ = conn.SetReadDeadline(time.Now().Add(wsCloseGrace))
+	for {
+		_, r, err := conn.NextReader()
+		if err != nil {
+			return // the peer's close echo, EOF, or the grace deadline
+		}
+		// Stream to the bin rather than buffering the message: this connection is
+		// already refused, so a rejected peer must not get the server to hold its
+		// bytes. (The accepted path reads messages because it has a stream to feed.)
+		if _, err := io.Copy(io.Discard, r); err != nil {
+			return
+		}
+	}
 }

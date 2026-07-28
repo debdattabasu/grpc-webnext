@@ -69,9 +69,24 @@ pub(crate) async fn serve(rt: Runtime, websocket: HyperWebsocket, reject: Option
     let (mut ws_sink, mut ws_stream) = ws.split();
 
     // Connection gate rejected this handshake: hand the client a readable gRPC status via a
-    // private close code, then drop the socket without reading a frame or creating a stream.
+    // private close code, then drop the socket without creating a stream.
     if let Some(status) = reject {
         let _ = ws_sink.send(close_for_status(&status)).await;
+        // Read the peer out before closing, exactly as the main loop does. A client opens
+        // and sends immediately — a browser's `onopen` fires the moment the 101 lands — so
+        // by now there is very likely a frame in flight. Closing a socket that still has
+        // unread bytes queued makes the OS answer with an RST, and an RST tells the peer's
+        // kernel to discard its receive buffer *including the close frame it had not yet
+        // parsed*. The client would then see a bare 1006 and report UNAVAILABLE instead of
+        // the status this close was carrying, which is the whole point of the private code.
+        let _ = tokio::time::timeout(CLOSE_GRACE, async {
+            while let Some(Ok(msg)) = ws_stream.next().await {
+                if matches!(msg, TungMessage::Close(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
         let _ = ws_sink.close().await;
         return;
     }

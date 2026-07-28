@@ -10,8 +10,10 @@ package webnext_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -840,6 +842,48 @@ func TestWSRejectsMissingCodecSubprotocol(t *testing.T) {
 	}
 	if got.terminal != nil {
 		t.Errorf("a handshake rejection must not send frames, got %v", got.terminal)
+	}
+}
+
+// A rejection must not close the socket while the peer may still be writing.
+//
+// Every client sends the moment the handshake completes — a browser's `onopen`
+// fires as soon as the 101 lands — so when the server rejects, a frame is
+// usually already in flight. Closing a socket that still has unread bytes queued
+// makes the OS answer with an RST, and an RST tells the peer's kernel to discard
+// its receive buffer *including the close frame it had not yet parsed*: the
+// client then sees a bare 1006 and reports UNAVAILABLE instead of the status the
+// close was carrying, which defeats the entire point of the private code. So the
+// server reads the peer out first, exactly as normal teardown does.
+//
+// Asserting that directly (write, then race the reset) would only reproduce
+// about half the time. This asserts the property underneath it: once the
+// rejection close has been read, the TCP connection is still open. It watches
+// the socket rather than the WebSocket because gorilla replays the close error
+// on every later read, whatever the connection is doing.
+// Rust: ws_rejection_drains_before_closing.
+func TestWSRejectionDoesNotCloseWhilePeerMayWrite(t *testing.T) {
+	s := startServer(t, webnext.ServerConfig{})
+	c, _, err := dialWS(t, s.baseURL, serverStream, false, webnext.WSSubprotocol)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.close()
+
+	// Suppress gorilla's automatic close echo: answering completes the handshake
+	// and the server may then close legitimately, which would hide the bug.
+	c.conn.SetCloseHandler(func(int, string) error { return nil })
+	if _, _, err := c.conn.ReadMessage(); !websocket.IsCloseError(err, webnext.WSCloseCode(codes.Unimplemented)) {
+		t.Fatalf("first read = %v, want close %d", err, webnext.WSCloseCode(codes.Unimplemented))
+	}
+
+	// With no echo sent, the only thing that can end this read is the server
+	// closing the socket — which is the bug.
+	raw := c.conn.NetConn()
+	_ = raw.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := raw.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("after the rejection close the server closed the socket (read = %v); "+
+			"it must drain the peer first, or an in-flight client frame turns the close into an RST", err)
 	}
 }
 
