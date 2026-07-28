@@ -121,7 +121,8 @@
           "items": { "enum": ["proto", "json"] },
           "description": "Run the case once per listed codec (cartesian with transports). Default [proto, json]."
         },
-        "timeout_millis": { "type": "integer", "description": "grpc-timeout the client sets on the call." },
+        "timeout_millis": { "type": "integer", "description": "grpc-timeout the client sets on the call. The client also enforces this locally, so a passing case does NOT prove the server did anything — use `header_timeout_millis` for that." },
+        "header_timeout_millis": { "type": "integer", "description": "Send `grpc-timeout` as a raw header WITHOUT arming the client's own deadline timer, so only the server can end the call. This is how server-side deadline enforcement is observed; with `timeout_millis` the client's timer fires first and masks the server. Unary only — a streaming call on the custom `Frame` path carries its deadline in the envelope, not a header." },
         "request_metadata": { "type": "array", "items": { "$ref": "#/$defs/metadatum" }, "description": "Request headers the driver attaches to the call." },
         "requires": {
           "type": "object",

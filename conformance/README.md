@@ -42,6 +42,22 @@ transport + codec, and asserts the observed wire behavior.
 
 The guarantee is the **matrix**: `{client drivers} × {server impls} × {transports} × {codecs}`.
 
+## A passing case can still test nothing
+
+Two traps, both of which have hidden a real bug here:
+
+- **A `transports: [websocket]` case only reaches the WebSocket if the RPC streams.** A
+  unary call takes the Fetch path under every profile.
+- **A case whose deadline the *client* enforces never tests the server.** Every
+  `timeout_millis` case arms the TS client's own timer, so it passes whether or not the
+  server honors `grpc-timeout` — which is how the Rust server's h2ts path came to receive
+  the header and ignore it while Go honored it, with a green matrix throughout. Use
+  `header_timeout_millis` to send the header and arm no local timer, so only the server can
+  end the call.
+
+The shape is the same both times: the driver quietly satisfying the assertion itself. When
+adding a case, ask what would have to break for it to fail.
+
 ## The runner contract
 
 An implementation joins the matrix by providing one (or both) of:

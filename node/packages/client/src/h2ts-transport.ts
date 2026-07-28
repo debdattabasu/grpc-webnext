@@ -269,9 +269,13 @@ function buildHeaders(options: TransportCallOptions): Array<[string, string]> {
     headers.push(["grpc-timeout", `${Math.ceil(options.timeoutMillis)}m`]); // "m" = milliseconds
   }
   options.metadata.toHeaders().forEach((value, key) => {
-    if (key !== "content-type" && key !== "te" && key !== "grpc-timeout") {
-      headers.push([key, value]);
-    }
+    if (key === "content-type" || key === "te") return;
+    // A caller-supplied `grpc-timeout` is honored only when the call sets no
+    // deadline of its own, so the computed value always wins. Passing it through is
+    // what lets a caller ask the *server* to enforce a deadline without also arming
+    // the local timer — the only way to observe that the server does its part.
+    if (key === "grpc-timeout" && options.timeoutMillis) return;
+    headers.push([key, value]);
   });
   return headers;
 }

@@ -61,3 +61,25 @@ cases:
       status: { code: 0 }
       response:
         payload: { text: "x" }
+
+  # Server-side enforcement, which every case above leaves untested.
+  #
+  # `timeout_millis` arms the client's own timer, so those cases pass whether or
+  # not the server does anything — the client always fires first. This one sends
+  # `grpc-timeout` as a raw header and sets no local deadline, so the *only* thing
+  # that can end the call is the server.
+  #
+  # That distinction is not academic: the Rust server's h2ts path received
+  # `grpc-timeout` and ignored it, while Go's honored it, and the divergence
+  # survived precisely because no case looked. Unary, so it rides a header on every
+  # profile (h2ts, and Fetch under the others) rather than the WS envelope.
+  - name: unary/server-enforced
+    rpc: Unary
+    header_timeout_millis: 100
+    request:
+      payload: { text: "x" }
+      response_definition:
+        payload: { text: "x" }
+        delay_ms: 2000
+    expect:
+      status: { code: 4 }

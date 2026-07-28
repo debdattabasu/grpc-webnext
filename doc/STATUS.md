@@ -12,6 +12,17 @@
 > `h2ts.rs`, normative in `spec/PROTOCOL_H2TS.md` ("Deadline enforcement"), pinned by
 > `the_server_enforces_grpc_timeout_on_the_h2ts_path` — which sends the header by hand with
 > no client-side timer, so only the server can end the call.
+>
+> **It was a Rust-only divergence, and the matrix should have caught it.** grpc-go's
+> `ServeHTTP` path parses `grpc-timeout` itself (`handler_server.go`), which is exactly the
+> path the Go server's h2ts handler uses — so Go was correct the whole time and only Rust
+> was wrong. Two servers, one right and one wrong, is the precise class of bug
+> `conformance/` exists to find. It survived because **every deadline case set
+> `timeout_millis`, which arms the TS client's own timer** — so all of them passed whether
+> or not any server did anything, on every profile. A case cannot test the server while the
+> client is racing it. Fixed by `header_timeout_millis` (send `grpc-timeout`, arm no local
+> timer) and the case `deadline/unary/server-enforced`; reverting the Rust fix now fails
+> that case on the Rust server while Go still passes.
 
 > **Note (2026-07-28):** a **fourth** shared bug, found by CI rather than by an audit —
 > and only on Linux. Both servers sent the `4000 + code` rejection close and then dropped

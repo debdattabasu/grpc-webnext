@@ -60,6 +60,7 @@ type Case = {
   rest?: Rest;
   codecs?: ("proto" | "json")[];
   timeout_millis?: number;
+  header_timeout_millis?: number;
   request_metadata?: Meta[];
   requires?: { max_message_bytes?: number; transcoder?: boolean };
   request?: Msg;
@@ -174,7 +175,16 @@ interface Result {
 type Client = ReturnType<typeof makeClient<typeof ConformanceServiceDefinition>>;
 
 function callOptions(c: Case) {
+  // Deliberately ignores `header_timeout_millis`: that case exists to prove the
+  // *server* enforces the deadline, so the client must not arm a timer of its own.
   return c.timeout_millis ? { deadline: Date.now() + c.timeout_millis } : {};
+}
+
+/** Request metadata, plus a raw `grpc-timeout` when the case asks the server to enforce it. */
+function requestMetadata(c: Case): Metadata {
+  const md = toMetadata(c.request_metadata);
+  if (c.header_timeout_millis) md.set("grpc-timeout", `${c.header_timeout_millis}m`);
+  return md;
 }
 
 function runUnary(client: Client, c: Case): Promise<Result> {
@@ -182,7 +192,7 @@ function runUnary(client: Client, c: Case): Promise<Result> {
   return new Promise((resolve) => {
     let headers = new Metadata();
     let status: StatusResult | undefined;
-    const call = client.unary(req, toMetadata(c.request_metadata), callOptions(c), (err, value) => {
+    const call = client.unary(req, requestMetadata(c), callOptions(c), (err, value) => {
       // The error path (deadline/cancel/backend error) surfaces via the callback, not a
       // `status` event — derive the status from the ServiceError when it didn't fire.
       if (!status) {
@@ -203,7 +213,7 @@ function runServerStream(client: Client, c: Case): Promise<Result> {
     let headers = new Metadata();
     const messages: ConformancePayload[] = [];
     let status: StatusResult;
-    const stream = client.serverStream(req, toMetadata(c.request_metadata), callOptions(c));
+    const stream = client.serverStream(req, requestMetadata(c), callOptions(c));
     stream.on("metadata", (md: Metadata) => (headers = md));
     stream.on("data", (m: ConformancePayload) => messages.push(m));
     stream.on("status", (st: StatusResult) => (status = st));
