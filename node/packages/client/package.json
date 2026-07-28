@@ -1,6 +1,6 @@
 {
   "name": "@grpc-webnext/client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Full bidirectional gRPC client for the browser and Node — real HTTP/2 tunneled over WebSockets via h2ts, plus JSON over Fetch + WebSocket.",
   "license": "MIT OR Apache-2.0",
   "author": "Debdatta Basu",

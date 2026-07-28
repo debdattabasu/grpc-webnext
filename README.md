@@ -7,6 +7,7 @@
 [![CI](https://github.com/debdattabasu/grpc-webnext/actions/workflows/ci.yml/badge.svg)](https://github.com/debdattabasu/grpc-webnext/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/grpc-webnext.svg?label=crates.io%20server)](https://crates.io/crates/grpc-webnext)
 [![npm](https://img.shields.io/npm/v/@grpc-webnext/client.svg?label=npm%20client)](https://www.npmjs.com/package/@grpc-webnext/client)
+[![crates.io](https://img.shields.io/crates/v/grpc-webnext-client.svg?label=crates.io%20wasm%20client)](https://crates.io/crates/grpc-webnext-client)
 [![Spec](https://img.shields.io/badge/spec-normative-success.svg)](spec/PROTOCOL.md)
 [![Conformance](https://img.shields.io/badge/conformance-passing-brightgreen.svg)](conformance/)
 &nbsp;·&nbsp;
@@ -162,7 +163,7 @@ UPSTREAM=http://localhost:50051 LISTEN=127.0.0.1:8080 cargo run -p grpc-webnext-
 | Conformance suite | [`conformance/`](conformance/) | ✅ language-neutral cases × Rust **and** Go servers × TS driver, run over the real wire |
 | Go in-process server | [`go/webnext`](go/webnext) | ✅ h2ts, custom `Frame`, `+json`, REST, deadlines, cancel, size limits, native same-port |
 | Node in-process server | [`node/packages/server`](node/packages/server) | ⬜ skeleton |
-| Rust client (WASM / frontend) | `rust/crates/grpc-webnext-client` | ⬜ planned |
+| Rust client (WASM / frontend)&nbsp;·&nbsp;[crates.io](https://crates.io/crates/grpc-webnext-client) | [`rust/crates/grpc-webnext-client`](rust/crates/grpc-webnext-client) | ✅ h2ts, all four cardinalities, deadlines, reconnect + connectivity — no tonic/hyper/tokio |
 
 > **Pre-1.0.** The Rust server/proxy, the Go server, and the TypeScript client are covered by
 > the conformance suite, which runs every case against both server implementations; the Node

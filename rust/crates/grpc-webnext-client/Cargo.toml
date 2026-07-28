@@ -5,8 +5,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "gRPC client for Rust WASM frontends, speaking real gRPC to a grpc-webnext endpoint over an h2ts WebSocket tunnel. No tonic, no hyper, no tokio."
+readme = "README.md"
 keywords = ["grpc", "wasm", "http2", "websocket", "frontend"]
 categories = ["network-programming", "web-programming::http-client", "wasm"]
+# The e2e test runs the real server in-process, so it depends on the in-workspace `grpc-webnext`
+# and `testecho` crates through path dev-dependencies — which cargo strips on publish. Keep it
+# out of the package rather than ship a test that cannot compile from a crates.io download.
+exclude = ["tests/"]
 
 [features]
 default = ["prost"]
