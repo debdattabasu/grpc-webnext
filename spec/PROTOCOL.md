@@ -316,6 +316,20 @@ and reports `UNAVAILABLE` instead of the status the close was carrying, which is
 point of the private code. Whatever arrives during that window is discarded; the connection
 is already refused.
 
+**Flow control.** There is none in this direction, by design. A server writes response
+frames as fast as its own bounded chain allows and a client cannot ask it to stop: the
+browser `WebSocket` API has no receive-side flow control — no `pause()`, no unread side,
+and `onmessage` fires regardless — so a credit frame here would be a protocol the *client*
+could not honor from the one place it matters. A client that falls behind therefore queues,
+which is the bargain every browser WebSocket library makes. **A client SHOULD expose that
+backlog** (the TS client: `ClientReadableStream.readableLength`). Server → client pressure
+does propagate to TCP, so a slow *reader* at the OS level still stalls the server;
+what cannot be expressed is a slow *application*.
+
+The binary default has real flow control instead, because it is real HTTP/2 —
+`WINDOW_UPDATE`, end-to-end, replenished as the application consumes. See
+[PROTOCOL_H2TS.md](PROTOCOL_H2TS.md) and `spec/COMPATIBILITY.md`.
+
 **Draining.** A server shutting down refuses *new* RPCs without cutting live ones. Because a
 socket carries exactly one stream, that distinction is per-socket: one that has **not yet
 opened its stream** is closed with **`1001 Going Away`**, and one carrying a live stream is

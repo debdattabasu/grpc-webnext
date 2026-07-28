@@ -10,7 +10,15 @@ import { CallContext, createCallContext, statusForAbort } from "./context.js";
 import { FetchTransport } from "./fetch-transport.js";
 import { Metadata } from "./metadata.js";
 import { ServiceError, Status } from "./status.js";
-import type { StatusResult, Transport, TransportCallOptions } from "./transport.js";
+import { nextDelay, resolvePolicy, sleep, Throttle } from "./retry.js";
+import type { RetryPolicy, RetryThrottling } from "./retry.js";
+import type {
+  StatusResult,
+  StreamCall,
+  Transport,
+  TransportCallOptions,
+  UnaryResponse,
+} from "./transport.js";
 import { WebSocketTransport } from "./ws-transport.js";
 import { H2tsTransport } from "./h2ts-transport.js";
 
@@ -53,6 +61,29 @@ export interface ClientOptions {
    * for `codec: "json"`.
    */
   streaming?: StreamTransport;
+  /**
+   * How many response messages queue for a `for await` consumer before the transport
+   * is asked to stop reading (default 32). Honored for real on the h2ts path, where
+   * not reading blocks the server; advisory on the `ws` path, which cannot stop a
+   * browser WebSocket from delivering. See `ClientReadableStream.deliver`.
+   */
+  readableHighWaterMark?: number;
+  /**
+   * Retry policy, **off unless set** — as in gRPC, where retries come from service config.
+   * `{}` takes every default (5 attempts, 100 ms → 2 s, ×2, on UNAVAILABLE). Applies to
+   * unary and to server-streaming *before its first message*; see the README for why
+   * client-streaming and bidi are excluded.
+   *
+   * Reconnecting a dropped tunnel is **not** this: an RPC that never reached the server is
+   * replayed transparently whatever this says.
+   */
+  retry?: RetryPolicy;
+  /**
+   * gRPC's retry throttle — a token bucket shared by every call, so a server that is
+   * failing everything cannot be retried into the ground. Opt-in; recommended whenever
+   * `retry` is set.
+   */
+  retryThrottling?: RetryThrottling;
 }
 
 /**
@@ -101,9 +132,15 @@ type Deserialize<T> = (bytes: Uint8Array) => T;
 export class Client {
   private readonly unaryTransport: Transport;
   private readonly streamTransport: Transport;
+  private readonly readableHighWaterMark?: number;
+  private readonly policy: ReturnType<typeof resolvePolicy> | null;
+  private readonly throttle: Throttle | null;
 
   constructor(options: ClientOptions) {
     const selection = resolveTransportSelection(options);
+    this.readableHighWaterMark = options.readableHighWaterMark;
+    this.policy = options.retry ? resolvePolicy(options.retry) : null;
+    this.throttle = options.retryThrottling ? new Throttle(options.retryThrottling) : null;
     // When either surface uses h2ts, share ONE H2Connection across both (H2 multiplexes).
     const h2ts =
       selection.unary === "h2ts" || selection.streaming === "h2ts"
@@ -146,21 +183,44 @@ export class Client {
   ): ClientUnaryCall {
     const ctx = createCallContext(options?.deadline, options?.signal);
     const call = new ClientUnaryCall(() => ctx.abort());
+    const request = serialize(argument);
 
-    this.unaryTransport
-      .unary(path, serialize(argument), transportOptions(metadata, ctx))
-      .then((res) => {
+    void (async () => {
+      // A unary call is the easy retry case: nothing has been delivered to the caller, so
+      // any attempt can simply be thrown away. The deadline needs no special handling —
+      // it aborts `ctx.signal`, which ends both the attempt and the backoff.
+      for (let attempt = 1; ; attempt++) {
+        let res: UnaryResponse | undefined;
+        let status: StatusResult;
+        try {
+          res = await this.unaryTransport.unary(path, request, transportOptions(metadata, ctx));
+          status = res.status;
+        } catch (e) {
+          const err = errorForFailure(ctx.signal, e);
+          status = { code: err.code, details: err.details, metadata: new Metadata() };
+        }
+
+        const delay = this.policy ? nextDelay(this.policy, this.throttle, status, attempt) : null;
+        if (delay !== null) {
+          this.throttle?.onFailure();
+          if (await sleep(delay, ctx.signal)) continue;
+        } else if (status.code === Status.OK) {
+          this.throttle?.onSuccess();
+        } else if (this.policy?.retryableStatusCodes.has(status.code)) {
+          this.throttle?.onFailure();
+        }
+
         ctx.dispose();
-        call.emit("metadata", res.headers);
-        call.emit("status", res.status);
-        const err = statusToError(res.status);
+        if (res) {
+          call.emit("metadata", res.headers);
+          call.emit("status", res.status);
+        }
+        const err = statusToError(status);
         if (err) callback(err);
-        else callback(null, deserialize(res.message));
-      })
-      .catch((e) => {
-        ctx.dispose();
-        callback(errorForFailure(ctx.signal, e));
-      });
+        else callback(null, deserialize(res!.message));
+        return;
+      }
+    })();
 
     return call;
   }
@@ -174,15 +234,62 @@ export class Client {
     options: CallOptions,
   ): ClientReadableStream<Res> {
     const ctx = createCallContext(options?.deadline, options?.signal);
+    const request = serialize(argument);
     let stream!: ClientReadableStream<Res>;
-    const call = this.streamTransport.startStream(
-      path,
-      transportOptions(metadata, ctx),
-      streamHandlers(() => stream, deserialize, ctx),
-    );
-    stream = new ClientReadableStream<Res>(() => call.cancel());
-    call.send(serialize(argument));
-    call.halfClose();
+    let call: StreamCall;
+    let attempt = 1;
+    // gRPC's commit rule: an RPC may be replayed until the caller has been shown
+    // something that a replay would contradict — here, the first response message.
+    // After that the attempt is committed and its status is the call's status.
+    let committed = false;
+    // Held rather than emitted, because a retried attempt would emit `metadata` twice.
+    // Headers alone do not commit the RPC; the first message does.
+    let headers: Metadata | undefined;
+
+    const commit = () => {
+      if (!committed) {
+        committed = true;
+        if (headers) stream.emit("metadata", headers);
+      }
+    };
+
+    const start = () => {
+      call = this.streamTransport.startStream(path, transportOptions(metadata, ctx), {
+        onHeaders: (md) => (headers = md),
+        onMessage: (bytes) => {
+          commit();
+          return stream.deliver(deserialize(bytes));
+        },
+        onStatus: (status) => {
+          if (!committed) {
+            const delay = this.policy ? nextDelay(this.policy, this.throttle, status, attempt) : null;
+            if (delay !== null) {
+              this.throttle?.onFailure();
+              attempt++;
+              void sleep(delay, ctx.signal).then((ok) => (ok ? start() : finish(status)));
+              return;
+            }
+            if (status.code === Status.OK) this.throttle?.onSuccess();
+            else if (this.policy?.retryableStatusCodes.has(status.code)) this.throttle?.onFailure();
+          }
+          finish(status);
+        },
+      });
+      call.send(request);
+      call.halfClose();
+    };
+
+    const finish = (status: StatusResult) => {
+      commit();
+      ctx.dispose();
+      stream.emit("status", status);
+      const err = statusToError(status);
+      if (err) stream.emit("error", err);
+      else stream.emit("end");
+    };
+
+    start();
+    stream = new ClientReadableStream<Res>(() => call.cancel(), this.readableHighWaterMark);
     return stream;
   }
 
@@ -217,6 +324,10 @@ export class Client {
     metadata: Metadata,
     options: CallOptions,
   ): ClientDuplexStream<Req, Res> {
+    // Not retried, deliberately: replaying a request stream means holding every message
+    // the caller has written for as long as the RPC might still be replayed, and an
+    // unbounded client-side buffer is exactly what this client declined to grow on the
+    // response side. Client-streaming (below) is excluded for the same reason.
     const ctx = createCallContext(options?.deadline, options?.signal);
     let stream!: ClientDuplexStream<Req, Res>;
     const call = this.streamTransport.startStream(
@@ -224,7 +335,7 @@ export class Client {
       transportOptions(metadata, ctx),
       streamHandlers(() => stream, deserialize, ctx),
     );
-    stream = new ClientDuplexStream<Req, Res>(call, serialize);
+    stream = new ClientDuplexStream<Req, Res>(call, serialize, this.readableHighWaterMark);
     return stream;
   }
 }
@@ -236,7 +347,9 @@ function streamHandlers<Res>(
 ) {
   return {
     onHeaders: (metadata: Metadata) => getStream().emit("metadata", metadata),
-    onMessage: (bytes: Uint8Array) => getStream().emit("data", deserialize(bytes)),
+    // `deliver` (not `emit("data")`) so a slow consumer can push back: it returns a
+    // promise while the consumer is behind, which the h2ts transport awaits.
+    onMessage: (bytes: Uint8Array) => getStream().deliver(deserialize(bytes)),
     onStatus: (status: StatusResult) => {
       ctx.dispose();
       const stream = getStream();
@@ -258,11 +371,16 @@ function transportOptions(metadata: Metadata, ctx: CallContext): TransportCallOp
 
 /** Map a transport failure to a ServiceError. An aborted signal means the call
  * was cancelled or timed out (fetch rejects with the abort reason, not always an
- * AbortError), so classify by the signal, not the error shape. */
+ * AbortError), so classify by the signal, not the error shape.
+ *
+ * Anything else is the transport failing to carry the call — a refused dial, a dropped
+ * tunnel, a network error. gRPC's status for that is UNAVAILABLE, which is also what
+ * makes it retryable under the default policy; it used to report UNKNOWN, which is the
+ * status for "the server did something we could not interpret". */
 function errorForFailure(signal: AbortSignal, e: unknown): ServiceError {
   if (signal.aborted) {
     const status = statusForAbort(signal);
     return new ServiceError(status.code, status.details);
   }
-  return new ServiceError(Status.UNKNOWN, e instanceof Error ? e.message : String(e));
+  return new ServiceError(Status.UNAVAILABLE, e instanceof Error ? e.message : String(e));
 }

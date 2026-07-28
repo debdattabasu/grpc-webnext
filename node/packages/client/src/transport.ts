@@ -29,7 +29,15 @@ export interface StatusResult {
 /** Event callbacks for a streaming call. All are optional. */
 export interface StreamHandlers {
   onHeaders?(metadata: Metadata): void;
-  onMessage?(message: Uint8Array): void;
+  /**
+   * One response message. Returning a promise means the consumer has fallen
+   * behind: a transport that can stop receiving SHOULD await it before reading
+   * again. On the h2ts path that is real backpressure — not reading stops HTTP/2
+   * window replenishment, so the server blocks. The custom `Frame` WebSocket path
+   * cannot: the browser WebSocket API has no receive-side flow control, so it
+   * ignores the promise and the messages queue client-side.
+   */
+  onMessage?(message: Uint8Array): void | Promise<void>;
   onStatus?(status: StatusResult): void;
 }
 

@@ -13,6 +13,8 @@ export type {
   ServiceClient,
   ServiceDefinition,
 } from "./service.js";
+export { PUSHBACK_HEADER } from "./retry.js";
+export type { RetryPolicy, RetryThrottling } from "./retry.js";
 export { makePromiseClient } from "./promise.js";
 export type { PromiseCallOptions, PromiseServiceClient } from "./promise.js";
 export {
@@ -20,6 +22,7 @@ export {
   ClientReadableStream,
   ClientUnaryCall,
   ClientWritableStream,
+  DEFAULT_READABLE_HIGH_WATER_MARK,
 } from "./call.js";
 export type { RequestCallback } from "./call.js";
 export { Metadata } from "./metadata.js";

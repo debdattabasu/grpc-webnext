@@ -74,8 +74,12 @@ What that buys, relative to the custom path:
   because browsers cannot read HTTP trailers — see `PROTOCOL.md`, "Unary — Fetch".)
 - **Real multiplexing**: many concurrent streams on one WebSocket, so the browser's
   ~6-connections-per-host cap on HTTP/1.1 stops mattering.
-- **Real flow control**: per-stream `WINDOW_UPDATE`, end to end between the browser's H2
-  stack and the server's.
+- **Real flow control**: per-stream `WINDOW_UPDATE`, end to end between h2ts and the
+  server's H2 stack — and **consumption-driven**, so it reaches all the way to the
+  application. h2ts hands the response body out as a `highWaterMark: 0` stream and returns
+  window only as that stream is read, so a consumer that stops reading stops the *server*
+  writing rather than filling memory in the tab. The custom path cannot offer this at all:
+  a browser `WebSocket` has no receive-side flow control (`PROTOCOL.md`, "Flow control").
 - **Real fragmentation**: a large message rides bounded `DATA` frames
   (`SETTINGS_MAX_FRAME_SIZE`), and h2ts forwards them **sub-frame** — it never holds a whole
   WebSocket message in memory. This is why grpc-webnext has no fragmentation of its own; see

@@ -12,13 +12,15 @@ blocks the current milestone; each is a follow-up pass.
 > *(Graceful shutdown and Go REST transcoding both landed later the same day; REST
 > conformance cases, two of the HttpRule gaps, and the vestigial field followed on
 > 2026-07-28. What is left is the Envoy filters, the HttpRule tail, and three client-side
-> items — see the TypeScript section.)*
+> items — see the TypeScript section. The HttpRule tail, consumer backpressure, and
+> retry/reconnect all closed later that day, and the TS REST helper was **declined** —
+> so the Envoy filters are the only open items left in this file.)*
 >
-> A pattern worth naming: **three separate items — backpressure, large-payload streaming, and
-> fragmentation — all closed with the same answer.** Each was a bespoke solution to a problem
-> HTTP/2 already solves, and each dissolved when the binary default moved to real H2 over
-> h2ts. Before adding transport machinery to the custom `Frame` path, check whether the
-> default path already has it.
+> A pattern worth naming: **four separate items — server-side backpressure, large-payload
+> streaming, fragmentation, and now client-side backpressure — all closed with the same
+> answer.** Each was a bespoke solution to a problem HTTP/2 already solves, and each
+> dissolved when the binary default moved to real H2 over h2ts. Before adding transport
+> machinery to the custom `Frame` path, check whether the default path already has it.
 
 ## Proxy — full gRPC semantics (README point 8)
 
@@ -42,8 +44,8 @@ how each item was resolved (or deliberately dropped):
   sends (`src/ws.rs`); the Go server mirrors it with `chan []byte, 16` / `chan wsOutbound,
   64` plus an unbuffered `io.Pipe` into grpc-go, so a slow service blocks the socket read
   rather than accumulating. Same reasoning that closed "stream large WS message payloads
-  without buffering" under Protocol. **Still open on the *client*** — see the TypeScript
-  section.
+  without buffering" under Protocol. The client half closed the same way on 2026-07-28 —
+  see the TypeScript section.
 - [x] ~~**Trailing vs initial metadata fidelity (unary).**~~ **Done.** Fetch unary now
   separates the two: initial metadata goes out as HTTP response headers, trailing metadata
   into the `Trailer` block alongside the status — including the trailers-only case, where
@@ -304,20 +306,105 @@ Two client flavors ship: callback/EventEmitter (`makeClient`) and promise/async-
 (`makePromiseClient`). All four cardinalities + AbortSignal cancellation are covered
 end-to-end. Remaining:
 
-- [ ] **No retry / reconnect.** (The pool half of this item is gone with multiplexing —
-  there is no pool.)
-- [ ] **`ClientReadableStream` has no backpressure / pause** — still true, and now the
-  *only* place backpressure is missing. `call.ts` appends every inbound message to an
-  unbounded `buffer` array and `next()` drains it, so a slow `for await` consumer grows
-  memory without ever slowing the sender. The server side propagates pressure to TCP on
-  every path (see the proxy section), so this is purely a client-side fix: stop reading
-  the socket / stop granting H2 window once the buffer passes a high-water mark.
+- [x] ~~**No retry / reconnect.**~~ **Done (2026-07-28).** Two separate things wearing one
+  bullet, and the reconnect half was the urgent one — it was three live bugs, not a
+  missing feature.
+
+  *Reconnect.* Every call rides one lazily-opened `H2Connection`, cached in a field that
+  was **never cleared**. So a tunnel that died stayed cached and every later call failed
+  forever; a client that started before its server cached the *rejected dial* and stayed
+  broken even once the server came up — and nothing fires a `closed` event for that one, so
+  it could never recover. On top of which the failure was reported `UNKNOWN` rather than
+  `UNAVAILABLE`, which is both wrong (UNKNOWN means "the server said something we could not
+  interpret") and load-bearing, since it made the failure unretryable under any sane policy.
+  The cache now evicts on close *and* on dial failure, never hands out a dead entry, and a
+  request handed to an already-dead tunnel is replayed once — gRPC's **transparent** retry,
+  which is not a policy decision and so lives in the transport. Pinned by
+  `reconnect.test.ts`, which cuts the tunnel with a TCP relay while leaving the server up,
+  so a failure to recover is unambiguously the client's.
+
+  *Retry.* gRPC's design: jittered exponential backoff, `retryableStatusCodes`,
+  `grpc-retry-pushback-ms` (including the negative "stop" case), and the token-bucket
+  throttle. **Off unless configured**, matching gRPC and matching this file's own position
+  on retry storms — the reason proxy-side retry was removed. Streams follow the commit
+  rule (retry until the first message reaches the caller); client-streaming and bidi are
+  excluded because replaying them needs an unbounded buffer of written messages, which is
+  the same thing the flow-control work declined to grow on the response side. Deviations
+  from gRPC, both deliberate and written up in `spec/COMPATIBILITY.md`: config is a client
+  option rather than per-method service config, and hedging is not implemented.
+
+  That compatibility table, incidentally, had been claiming retries were `✅ client-side
+  policy` on every column the whole time — including hedging. Fixed; the table now says
+  what is true.
+- [x] ~~**`ClientReadableStream` has no backpressure / pause.**~~ **Done (2026-07-28),
+  and it split into two very different halves.**
+
+  *Real backpressure, on the default path.* `deliver()` returns a promise while the
+  consumer is behind and the h2ts read loop awaits it. That is the entire mechanism: h2ts
+  hands out response bodies as `highWaterMark: 0`, consumption-driven streams, so not
+  reading withholds `WINDOW_UPDATE` and **tonic/grpc-go blocks**. Pinned by
+  `flow-control.test.ts`, whose load-bearing assertion is not the queue depth but that a
+  2.5 MiB response *cannot terminate* while the consumer is away — with the `await`
+  removed, 39 messages arrive and the RPC completes. Once again the answer was "the
+  default path already has it": the fourth item in this file to close that way.
+
+  *Not backpressure, on the custom path — and that is the answer, not a TODO.* A browser
+  `WebSocket` has no receive-side flow control: no `pause()`, no unread side, `onmessage`
+  fires regardless. A credit frame would be a protocol the client could not honor from the
+  one place it matters, and would reimplement HTTP/2 flow control for the opt-out
+  transport — the same reasoning that rejected a bespoke `fragment` frame kind above. So
+  messages queue, as in every browser WebSocket library, and the client instead **exposes**
+  the backlog (`readableLength`) and can stop it growing (`pause()`/`resume()`). Written up
+  in `spec/COMPATIBILITY.md` and pinned by a test asserting the queue *does* grow past the
+  mark there — so if this ever changes, that test says so.
+
+  *A real bug fell out.* The stream fed its own iterator queue **as well as** emitting
+  `data`, so a callback consumer retained every message it had already handled, for the
+  life of the stream. Attaching a `data` listener is now flowing mode (Node's rule) and
+  retains nothing. Left alone it would have become a deadlock rather than a leak once
+  backpressure landed — a flowing consumer never drains that queue, so it would have parked
+  the transport at the high-water mark forever. Mutation-checked: reinstating it hangs the
+  suite.
 - [x] ~~Deadlines sent but not locally enforced~~ — a client-side timer (`context.ts`)
   now fires DEADLINE_EXCEEDED on both the Fetch and WebSocket paths.
 - [x] ~~Server/client-streaming untested~~ — covered via the promise-client e2e
   (Greeter server-stream, client-stream, bidi).
 - [x] ~~AbortSignal → WebSocket cancel~~ — `signal` now sends a `Reset` and locally
   terminates the stream with CANCELLED (deadline aborts report DEADLINE_EXCEEDED).
+
+### A REST helper in the client — **declined** (2026-07-28)
+
+Calling a method through its `google.api.http` URL from the typed client, rather than
+`POST /pkg.Service/Method`. Not deferred — **declined**, because the feature argues against
+itself:
+
+- **The client already reaches every service with JSON**, over the base endpoints. There is
+  no capability the helper would unlock, only a different URL.
+- **The annotated URL exists for consumers who have no SDK.** That is the claim
+  `conformance/cases/rest.yaml` deliberately tests by driving `rest:` cases with a *raw HTTP
+  client*. A helper is the SDK reaching for the thing defined as the no-SDK path.
+- **The typed part is already free.** ts-proto emits `fromJSON` for every message, so a
+  cacheable annotated `GET` — the one thing the base endpoints genuinely cannot offer, since
+  they are all POSTs — is already two lines:
+  `ConformancePayload.fromJSON(await (await fetch("/v1/rest/5")).json())`. The helper would
+  save the URL template, nothing more.
+- **The cost is permanent.** It is a *third* HttpRule implementation, running backwards
+  (message → URL, where both servers do URL → message), and
+  [`HTTPRULE_GAPS.md`](HTTPRULE_GAPS.md) already requires the two existing routers to change
+  in lockstep. Trading a maintained inverse implementation for a saved string is the wrong
+  side of that bargain — and an inverse is exactly where drift hides.
+
+Reversible if a deployment turns up that can *only* be reached through annotated paths, in
+which case the right shape is probably a REST-specific generated client, not a helper bolted
+onto the gRPC one.
+
+**Correction to the record:** this item had been carried as blocked on codegen — "ts-proto
+emits no annotation information". That is **false**. ts-proto does not *resolve* custom
+options, so it preserves them as unknown fields, and the annotation is in the generated
+output today: `options._unknownFields[578365826]` (tag for field 72295728,
+`google.api.http`). All six annotated conformance methods carry theirs intact, nested
+`additional_bindings`, `response_body` and multi-segment captures included. The blocker was
+imaginary; the decision above is made on merits instead.
 
 ## Codec
 

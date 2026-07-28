@@ -24,11 +24,17 @@ export interface H2tsTransportOptions {
   webSocketImpl?: typeof WebSocket;
 }
 
+/** The cached tunnel, plus whether it is still usable. */
+interface Tunnel {
+  connection: Promise<H2Connection>;
+  alive: boolean;
+}
+
 export class H2tsTransport implements Transport {
   private readonly wsUrl: string;
   private readonly authority: string;
   private readonly webSocketImpl?: typeof WebSocket;
-  private connection: Promise<H2Connection> | null = null;
+  private tunnel: Tunnel | null = null;
   private closed = false;
 
   constructor(options: H2tsTransportOptions) {
@@ -41,15 +47,44 @@ export class H2tsTransport implements Transport {
     this.webSocketImpl = options.webSocketImpl;
   }
 
-  /** One lazily-opened H2 connection, reused (and H2-multiplexed) across all calls. */
+  /**
+   * One lazily-opened H2 connection, reused (and H2-multiplexed) across all calls —
+   * and **redialed** once it dies.
+   *
+   * The cache is the whole of reconnection. Holding a dead tunnel would break the
+   * client permanently after any blip; holding a *rejected* dial would break a client
+   * that merely started before its server did. So the entry is dropped both when the
+   * connection closes and when the dial fails, and a dead-but-not-yet-evicted entry is
+   * never handed out.
+   */
   private conn(): Promise<H2Connection> {
-    if (!this.connection) {
-      const opts: WebSocketConnectOptions = {
-        WebSocket: this.webSocketImpl as WebSocketConnectOptions["WebSocket"],
-      };
-      this.connection = connectWebSocket(this.wsUrl, opts);
-    }
-    return this.connection;
+    if (this.tunnel?.alive) return this.tunnel.connection;
+    const opts: WebSocketConnectOptions = {
+      WebSocket: this.webSocketImpl as WebSocketConnectOptions["WebSocket"],
+    };
+    const tunnel: Tunnel = { alive: true, connection: undefined as never };
+    tunnel.connection = connectWebSocket(this.wsUrl, opts).then(
+      (connection) => {
+        const die = () => {
+          tunnel.alive = false;
+          if (this.tunnel === tunnel) this.tunnel = null;
+        };
+        connection.closed.then(die, die);
+        return connection;
+      },
+      (e) => {
+        tunnel.alive = false;
+        if (this.tunnel === tunnel) this.tunnel = null;
+        throw e;
+      },
+    );
+    this.tunnel = tunnel;
+    return tunnel.connection;
+  }
+
+  /** Whether the tunnel a call is about to use is already known to be dead. */
+  private stale(tunnel: Tunnel | null): boolean {
+    return tunnel !== null && !tunnel.alive;
   }
 
   async unary(
@@ -57,23 +92,37 @@ export class H2tsTransport implements Transport {
     request: Uint8Array,
     options: TransportCallOptions,
   ): Promise<UnaryResponse> {
-    const conn = await this.conn();
-    const res = await conn.request({
-      method: "POST",
-      path,
-      authority: this.authority,
-      scheme: "http",
-      headers: buildHeaders(options),
-      body: encodeMessage(request),
-      signal: options.signal,
-    });
-    const body = await res.bytes(); // consume the body so trailers() is populated
-    const messages = new GrpcFrameParser().push(body);
-    return {
-      message: messages[0] ?? new Uint8Array(0),
-      headers: metadataFromRecord(res.headers),
-      status: statusFromResponse(res),
-    };
+    // Two attempts, and only ever two: a tunnel can die between the liveness check and
+    // the write, and an RPC handed to an already-dead connection provably never reached
+    // the server, so replaying it cannot duplicate an effect. That is gRPC's *transparent*
+    // retry — it is not a policy decision, which is why it lives here rather than in the
+    // retry layer, and why it applies to clients that configure no retry at all.
+    for (let attempt = 0; ; attempt++) {
+      const tunnel = this.tunnel;
+      try {
+        const conn = await this.conn();
+        const res = await conn.request({
+          method: "POST",
+          path,
+          authority: this.authority,
+          scheme: "http",
+          headers: buildHeaders(options),
+          body: encodeMessage(request),
+          signal: options.signal,
+        });
+        const body = await res.bytes(); // consume the body so trailers() is populated
+        const messages = new GrpcFrameParser().push(body);
+        return {
+          message: messages[0] ?? new Uint8Array(0),
+          headers: metadataFromRecord(res.headers),
+          status: statusFromResponse(res),
+        };
+      } catch (e) {
+        // Only when the tunnel we used is now known dead — a live connection returning an
+        // error is the server talking, and replaying that would be a policy decision.
+        if (attempt > 0 || options.signal?.aborted || !this.stale(tunnel)) throw e;
+      }
+    }
   }
 
   startStream(
@@ -118,12 +167,33 @@ export class H2tsTransport implements Transport {
         handlers.onHeaders?.(metadataFromRecord(res.headers));
         const reader = res.body.getReader();
         const parser = new GrpcFrameParser();
-        for (;;) {
+        // Resolves on cancel, so a delivery parked on a slow consumer cannot outlive
+        // the call and strand this loop.
+        const aborted = new Promise<void>((resolve) => {
+          if (controller.signal.aborted) resolve();
+          else controller.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        outer: for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
-          if (value) for (const message of parser.push(value)) handlers.onMessage?.(message);
+          if (!value) continue;
+          for (const message of parser.push(value)) {
+            // Awaiting a behind consumer is what makes backpressure real here: while
+            // we are not reading, h2ts withholds WINDOW_UPDATEs (its bodies are
+            // highWaterMark-0 and consumption-driven), so the server itself blocks
+            // rather than us buffering the stream in memory.
+            const pending = handlers.onMessage?.(message);
+            if (pending) await Promise.race([pending, aborted]);
+            if (controller.signal.aborted) break outer;
+          }
         }
-        handlers.onStatus?.(statusFromResponse(res));
+        // A cancel that landed while we were parked never reaches `reader.read()`,
+        // so it would otherwise be reported as the response's own status.
+        handlers.onStatus?.(
+          controller.signal.aborted
+            ? abortOrUnknown(controller.signal, options.signal, null)
+            : statusFromResponse(res),
+        );
       } catch (e) {
         handlers.onStatus?.(abortOrUnknown(controller.signal, options.signal, e));
       }
@@ -144,9 +214,9 @@ export class H2tsTransport implements Transport {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    const conn = this.connection;
-    this.connection = null;
-    if (conn) void conn.then((c) => c.close()).catch(() => {});
+    const tunnel = this.tunnel;
+    this.tunnel = null;
+    if (tunnel) void tunnel.connection.then((c) => c.close()).catch(() => {});
   }
 }
 
