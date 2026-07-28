@@ -221,10 +221,11 @@ needing verification.
     types in the URL.
   - `body:` naming a scalar, repeated, or dotted field.
 
-  **Closed 2026-07-28:** bare `*`/`**` wildcard segments, and field names resolving by
-  JSON (lowerCamelCase) name as well as `.proto` name. Both landed in Rust and Go
-  together; the wildcards are covered by conformance cases, so the two servers are held
-  to them over the wire rather than each passing its own tests.
+  **Closed 2026-07-28:** `response_body` (the last gap that returned a *wrong answer*),
+  bare `*`/`**` wildcard segments, and field names resolving by JSON (lowerCamelCase) name
+  as well as `.proto` name. All landed in Rust and Go together and are covered by
+  conformance cases, so the two servers are held to them over the wire rather than each
+  passing its own tests.
 
   *(The 2026-07-27 audit also **fixed** one thing it found rather than filing it: a
   trailing custom verb (`:cancel`) was stripped from the template instead of matched, so

@@ -330,7 +330,11 @@ async fn json_fetch(rt: &Runtime, req: Request<Incoming>, sdk_json: bool) -> Res
             let Ok(grpc_path) = call.grpc_method.parse::<PathAndQuery>() else {
                 return webnext_error("application/json", Code::Internal, "bad transcoded method path");
             };
-            return json_upstream(rt, &tc, grpc_path, call.message.into(), &parts.headers, "application/json", deadline).await;
+            return json_upstream(
+                rt, &tc, grpc_path, call.message.into(), &parts.headers, "application/json", deadline,
+                &call.response_body,
+            )
+            .await;
         }
         Ok(None) => {} // not a REST URL — fall through to the main method path
         Err(e) => return webnext_error("application/json", Code::InvalidArgument, &format!("bad REST request: {e}")),
@@ -350,7 +354,7 @@ async fn json_fetch(rt: &Runtime, req: Request<Incoming>, sdk_json: bool) -> Res
         Ok(p) => p,
         Err(e) => return webnext_error(resp_ct, Code::InvalidArgument, &format!("bad json request: {e}")),
     };
-    json_upstream(rt, &tc, pq, proto.into(), &parts.headers, resp_ct, deadline).await
+    json_upstream(rt, &tc, pq, proto.into(), &parts.headers, resp_ct, deadline, "").await
 }
 
 /// Call the backend with an already-encoded binary request and render the binary response
@@ -365,6 +369,8 @@ async fn json_upstream(
     req_headers: &HeaderMap,
     resp_ct: &str,
     deadline: Option<std::time::Duration>,
+    // A REST binding's `response_body`; empty for the whole message.
+    response_body: &str,
 ) -> Response<ResBody> {
     let mut builder = Request::builder().method(http::Method::POST).uri(grpc_path.clone());
     for (name, value) in req_headers.iter() {
@@ -402,7 +408,7 @@ async fn json_upstream(
     let (status_code, status_message) = metadata::read_status(&trailer_headers, &resp_parts.headers);
 
     let json_body = if status_code == 0 && !out_message.is_empty() {
-        match tc.response_proto_to_json(grpc_path.path(), &out_message) {
+        match tc.response_proto_to_json_body(grpc_path.path(), &out_message, response_body) {
             Ok(j) => Bytes::from(j),
             Err(e) => return webnext_error(resp_ct, Code::Internal, &format!("bad json response: {e}")),
         }

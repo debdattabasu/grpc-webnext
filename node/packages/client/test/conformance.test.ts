@@ -71,6 +71,8 @@ type Case = {
     response?: Matcher;
     messages?: Matcher[];
     message_count?: number;
+    raw_body?: string;
+    raw_messages?: string[];
     received_count?: number;
     headers_contain?: Meta[];
     trailers_contain?: Meta[];
@@ -161,6 +163,13 @@ interface Result {
   httpStatus?: number;
   /** ClientStream only: how many request messages the server reports having received. */
   receivedCount?: number;
+  /**
+   * REST only: the response body / streamed messages as raw JSON text. A
+   * `response_body` binding answers with a bare field value rather than the RPC's
+   * response message, so there is nothing for a message matcher to decode.
+   */
+  rawBody?: string;
+  rawMessages?: string[];
 }
 type Client = ReturnType<typeof makeClient<typeof ConformanceServiceDefinition>>;
 
@@ -308,9 +317,12 @@ async function runRestFetch(baseUrl: string, c: Case): Promise<Result> {
     details: decodeURIComponent(resp.headers.get("grpc-message") ?? ""),
     metadata: md,
   };
-  const response =
-    resp.ok && code === Status.OK && text.length > 0 ? ConformancePayload.fromJSON(JSON.parse(text)) : undefined;
-  return { headers: md, messages: [], response, status, httpStatus: resp.status };
+  // Decode as a ConformancePayload only when the body IS one. A `response_body`
+  // binding answers with a bare field value, so the case asserts `raw_body` instead
+  // and decoding would be meaningless (or throw).
+  const decodable = resp.ok && code === Status.OK && text.startsWith("{");
+  const response = decodable ? ConformancePayload.fromJSON(JSON.parse(text)) : undefined;
+  return { headers: md, messages: [], response, status, httpStatus: resp.status, rawBody: text };
 }
 
 /** The request messages a REST case sends: one `body`, several `bodies`, or none at all. */
@@ -336,6 +348,7 @@ function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
     // A client-streaming route answers once, so its reply is the `response`, not a message.
     let response: ConformancePayload | undefined;
     let receivedCount: number | undefined;
+    const rawMessages: string[] = [];
     let status: StatusResult | undefined;
 
     ws.onopen = () => {
@@ -371,11 +384,14 @@ function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
       } else if (frame.message !== undefined) {
         // A client-streaming RPC replies with a ClientStreamResponse wrapping the payload;
         // every other cardinality replies with a bare ConformancePayload.
+        rawMessages.push(JSON.stringify(frame.message));
         if (c.rpc === "ClientStream") {
           const cs = ClientStreamResponse.fromJSON(frame.message);
           response = cs.payload;
           receivedCount = cs.receivedCount;
-        } else {
+        } else if (typeof frame.message === "object" && frame.message !== null) {
+          // Same reasoning as the Fetch path: a `response_body` binding streams bare
+          // field values, which are asserted with `raw_messages`.
           messages.push(ConformancePayload.fromJSON(frame.message));
         }
       } else {
@@ -389,7 +405,7 @@ function runRestWebSocket(baseUrl: string, c: Case): Promise<Result> {
         const code = ev.code >= 4000 && ev.code <= 4016 ? ev.code - 4000 : Status.UNAVAILABLE;
         status = { code, details: ev.reason ?? "", metadata: new Metadata() };
       }
-      resolve({ headers, messages, response, receivedCount, status });
+      resolve({ headers, messages, response, receivedCount, rawMessages, status });
     };
     ws.onerror = () => {
       if (!status) status = { code: Status.UNAVAILABLE, details: "websocket error", metadata: new Metadata() };
@@ -468,6 +484,9 @@ function assertCase(c: Case, r: Result) {
   // the response payload comes from the FIRST request's ResponseDefinition regardless.
   if (c.expect.received_count !== undefined)
     expect(r.receivedCount, "received_count").toBe(c.expect.received_count);
+  // Raw matchers, for bodies that are not the RPC's response message.
+  if (c.expect.raw_body !== undefined) expect(r.rawBody, "raw_body").toBe(c.expect.raw_body);
+  if (c.expect.raw_messages) expect(r.rawMessages ?? [], "raw_messages").toEqual(c.expect.raw_messages);
   if (c.expect.headers_contain) assertMetaContains(r.headers, c.expect.headers_contain);
   if (c.expect.trailers_contain) assertMetaContains(r.status.metadata, c.expect.trailers_contain);
 }

@@ -345,7 +345,10 @@ async fn run_stream(
                 deframer.push(&data);
                 while let Some(msg) = deframer.next_message() {
                     let payload = if json {
-                        match transcoder.as_ref().unwrap().response_proto_to_json(&method_path, &msg) {
+                        // An annotation route may name a single response field.
+                        let response_body = annotation.as_ref().map(|a| a.response_body()).unwrap_or("");
+                        let tc = transcoder.as_ref().unwrap();
+                        match tc.response_proto_to_json_body(&method_path, &msg, response_body) {
                             Ok(j) => j.into(),
                             Err(e) => {
                                 send_reset(&outbound_tx, json, Code::Internal, &format!("json encode: {e}")).await;

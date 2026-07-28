@@ -93,11 +93,11 @@ grammar. Current coverage:
 | streaming | [cases/streaming.yaml](cases/streaming.yaml) | server-stream (incl. messages-then-error), client-stream aggregate (with `received_count`), bidi echo, client cancel → CANCELLED |
 | deadline | [cases/deadline.yaml](cases/deadline.yaml) | unary + stream `grpc-timeout` expiry (DEADLINE_EXCEEDED); within-deadline passes |
 | limits | [cases/limits.yaml](cases/limits.yaml) | oversize request rejected on every path, large response intact, `+json` w/o transcoder → UNIMPLEMENTED, ASCII+`-bin` metadata round-trip on **both** Fetch and WebSocket |
-| rest | [cases/rest.yaml](cases/rest.yaml) | `google.api.http` routes: `body:"*"` on Fetch and WebSocket, path/query binding, `additional_bindings`, bare `*`/`**` wildcards, binding precedence, status + metadata fidelity, deadlines, **multi-message** bidi and client-streaming routes, and both wrong-surface rejections |
+| rest | [cases/rest.yaml](cases/rest.yaml) | `google.api.http` routes: `body:"*"` on Fetch and WebSocket, path/query binding, `additional_bindings`, bare `*`/`**` wildcards, `response_body`, binding precedence, status + metadata fidelity, deadlines, **multi-message** bidi and client-streaming routes, and both wrong-surface rejections |
 
 Each case runs under every applicable **transport profile** — `proto/h2ts` (real gRPC over
 the h2ts tunnel), `proto/ws` (the custom `Frame` path, unary over Fetch), and `json` (the
-custom path, Fetch + WS) — against **every server implementation**. 75 case×profile runs per
+custom path, Fetch + WS) — against **every server implementation**. 79 case×profile runs per
 server, Rust and Go, all green.
 
 ### REST cases are different, on purpose
@@ -113,7 +113,7 @@ transport (a unary annotation URL is Fetch, a streaming one is a WebSocket — t
 rule, not the driver's choice). What the matrix still contributes is the part that matters:
 every REST case runs against **every server implementation**.
 
-Four conventions worth knowing before writing one:
+Five conventions worth knowing before writing one:
 
 - **Rejections.** A Fetch-surface refusal never becomes an RPC, so it is asserted with
   `expect.http_status` (e.g. `+proto` on a REST URL is `415`). A WebSocket refusal *does*
@@ -126,6 +126,9 @@ Four conventions worth knowing before writing one:
 - **Client streaming is a WebSocket route**, not a Fetch one. It is a stream that happens to
   answer once, so its annotation URL behaves like every other streaming method's — routing it
   to Fetch is the easy mistake, and `client-stream-multi-message` is what catches it.
+- **Raw bodies.** A `response_body` binding answers with a bare field value, not the RPC's
+  response message, so those cases assert `expect.raw_body` / `expect.raw_messages` — the
+  JSON verbatim — because no message matcher has anything to decode.
 - **`cancel_after_messages` is not honored** on a REST case. Turning a mid-stream reset into
   a local `CANCELLED` is *client* behavior, and this driver is deliberately not a client; the
   main-surface bidi cancel case covers it instead.

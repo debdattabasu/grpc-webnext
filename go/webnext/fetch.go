@@ -180,7 +180,8 @@ func (h *handler) unaryJSON(w http.ResponseWriter, r *http.Request, sdkJSON bool
 			"bad REST request: "+err.Error(), nil, nil)
 		return
 	case matched:
-		h.jsonUpstream(w, r, call.grpcMethod, call.message, "application/json", deadline, hasDeadline)
+		h.jsonUpstream(w, r, call.grpcMethod, call.message, "application/json", deadline, hasDeadline,
+			call.responseBody)
 		return
 	}
 
@@ -202,7 +203,7 @@ func (h *handler) unaryJSON(w http.ResponseWriter, r *http.Request, sdkJSON bool
 		jsonResponse(w, respCT, nil, uint32(codes.InvalidArgument), "bad json request: "+err.Error(), nil, nil)
 		return
 	}
-	h.jsonUpstream(w, r, path, message, respCT, deadline, hasDeadline)
+	h.jsonUpstream(w, r, path, message, respCT, deadline, hasDeadline, "")
 }
 
 // jsonUpstream dispatches an already-encoded binary request and renders the
@@ -213,6 +214,8 @@ func (h *handler) jsonUpstream(
 	w http.ResponseWriter, r *http.Request,
 	path string, message []byte, respCT string,
 	deadline time.Duration, hasDeadline bool,
+	// responseBody is a REST binding's `response_body`; empty for the whole message.
+	responseBody string,
 ) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -249,7 +252,7 @@ func (h *handler) jsonUpstream(
 
 	var jsonBody []byte
 	if messages := deframeAll(respBody); code == 0 && len(messages) > 0 {
-		encoded, err := h.cfg.Transcoder.ResponseProtoToJSON(path, messages[0])
+		encoded, err := h.cfg.Transcoder.ResponseProtoToJSONBody(path, messages[0], responseBody)
 		if err != nil {
 			jsonResponse(w, respCT, nil, uint32(codes.Internal), "bad json response: "+err.Error(), nil, nil)
 			return

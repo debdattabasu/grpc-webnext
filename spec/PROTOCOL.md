@@ -141,14 +141,22 @@ that carries one (a colon in path *data* is percent-encoded, so it still binds);
 `additional_bindings`; path templates with literal segments, `{field}`/`{field=*}`
 single-segment captures, `{field=**}` rest-captures, bare `*`/`**` wildcards that match
 without capturing, and dotted field paths; `body: "*"` / `body: "<field>"` / none;
-query-param binding to scalar/repeated fields. Field names in a path template or a query
-key resolve by `.proto` name **or** JSON (lowerCamelCase) name.
+`response_body` (below); query-param binding to scalar/repeated fields. Field names in a
+path template or a query key resolve by `.proto` name **or** JSON (lowerCamelCase) name.
 Where several bindings can match one URL, the **first in descriptor order wins** — there
 is no specificity ranking.
 
+**`response_body`** names a **top-level** field of the response message, and makes the
+body that field's value rather than the whole message — so `response_body: "resource"` on
+a method returning `{"resource": {...}, "etag": "..."}` answers with just the `{...}`. It
+is applied with the codec's own encoding, so a `bytes` field answers a base64 **string**, a
+64-bit integer answers a quoted number, an enum answers its value name. When the field is
+absent from the encoded message (protobuf-JSON omits defaults), the body is that field's
+**JSON zero** — `""`, `0`, `"0"` for 64-bit, `false`, `[]`, `null` for an unset message —
+never an omitted body. On a **stream** it applies **per message**, not once to the stream.
+
 Not supported — the same list in both server implementations, enumerated with its
-consequences in [`doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md): `response_body`
-(silently ignored, so the whole response message comes back), `HttpRule.selector` /
+consequences in [`doc/HTTPRULE_GAPS.md`](../doc/HTTPRULE_GAPS.md): `HttpRule.selector` /
 service-config rule lists, multi-segment patterns like `{name=shelves/*}`, non-scalar
 query binding (including well-known types such as `FieldMask`), and scalar/repeated/dotted
 `body` fields.
@@ -340,6 +348,10 @@ Consequences:
   body *is* the message) query params are **ignored entirely**; path vars still overlay.
   For a non-wildcard body, a query param naming a field already set by a path var is
   skipped.
+- **Bindings resolve in declaration order** — the first whose verb and template match wins.
+  There is deliberately no specificity ranking, so a later binding must not describe a URL
+  shape an earlier one already covers (`POST /v1/x/{id}` declared before `POST /v1/x/body`
+  swallows the latter, binding `id="body"`).
 
 ## In-process vs proxy: what needs schemas
 

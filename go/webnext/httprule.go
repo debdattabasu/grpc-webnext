@@ -16,13 +16,14 @@
 //     match without capturing, and dotted field paths (`{a.b}`) binding nested
 //     fields,
 //   - `body: "*"` (whole message), `body: "<field>"` (a sub-message field), or none,
+//   - `response_body` — answer with one top-level response field (see transcode.go),
 //   - query params bound to (possibly nested) scalar/repeated fields, keyed by
 //     either the `.proto` field name or its JSON (lowerCamelCase) name.
 //
 // The unsupported surface is identical too, and enumerated in
-// doc/HTTPRULE_GAPS.md: `response_body`, `HttpRule.selector` (service-config
-// rules), multi-segment patterns such as `{name=shelves/*}`, non-scalar query
-// binding, and scalar/repeated/dotted body fields.
+// doc/HTTPRULE_GAPS.md: `HttpRule.selector` (service-config rules), multi-segment
+// patterns such as `{name=shelves/*}`, non-scalar query binding, and
+// scalar/repeated/dotted body fields.
 
 package webnext
 
@@ -85,8 +86,11 @@ type binding struct {
 	customVerb string
 	body       bodyKind
 	bodyField  string // set when body == bodyField
-	grpcMethod string // "/pkg.Service/Method"
-	input      protoreflect.MessageDescriptor
+	// responseBody is `response_body` — the top-level response field to return
+	// instead of the whole message. Empty means the whole message.
+	responseBody string
+	grpcMethod   string // "/pkg.Service/Method"
+	input        protoreflect.MessageDescriptor
 }
 
 // pathVar is a captured path variable: the dotted field path it binds to and its
@@ -101,6 +105,10 @@ type pathVar struct {
 type httpCall struct {
 	grpcMethod string
 	message    []byte
+	// responseBody is the binding's `response_body`, empty for the whole message.
+	// Carried on the call because the response is encoded long after the binding
+	// is matched.
+	responseBody string
 }
 
 // wsBinding is a WebSocket route resolved from an annotation URL: the target
@@ -117,6 +125,10 @@ func (b *wsBinding) method() string { return b.binding.grpcMethod }
 // hasBody reports whether the route takes a request body. False for GET-style
 // server-streams, where the request comes entirely from the URL (path + query).
 func (b *wsBinding) hasBody() bool { return b.binding.body != bodyNone }
+
+// responseBody is the binding's `response_body` — the top-level response field to
+// return instead of the whole message. Empty means the whole message.
+func (b *wsBinding) responseBody() string { return b.binding.responseBody }
 
 // buildMessage builds a request message from a body payload, overlaying the URL
 // path/query bindings.
@@ -189,13 +201,14 @@ func (r *httpRouter) push(rule *annotations.HttpRule, grpcMethod string, input p
 	body, field := bodyRule(rule)
 	segments, customVerb := parseTemplate(template)
 	r.bindings = append(r.bindings, &binding{
-		httpMethod: verb,
-		segments:   segments,
-		customVerb: customVerb,
-		body:       body,
-		bodyField:  field,
-		grpcMethod: grpcMethod,
-		input:      input,
+		httpMethod:   verb,
+		segments:     segments,
+		customVerb:   customVerb,
+		body:         body,
+		bodyField:    field,
+		responseBody: rule.GetResponseBody(),
+		grpcMethod:   grpcMethod,
+		input:        input,
 	})
 }
 
@@ -373,7 +386,7 @@ func (r *httpRouter) transcode(method, path, query string, body []byte) (*httpCa
 	if err != nil {
 		return nil, true, err
 	}
-	return &httpCall{grpcMethod: b.grpcMethod, message: message}, true, nil
+	return &httpCall{grpcMethod: b.grpcMethod, message: message, responseBody: b.responseBody}, true, nil
 }
 
 // buildMessage builds the encoded request message from a matched binding.

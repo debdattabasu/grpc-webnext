@@ -152,6 +152,15 @@
             "response": { "$ref": "#/$defs/payloadMatcher" },
             "messages": { "type": "array", "items": { "$ref": "#/$defs/payloadMatcher" } },
             "message_count": { "type": "integer" },
+            "raw_body": {
+              "type": "string",
+              "description": "REST only: assert the response body VERBATIM, as JSON text. Needed when the body is not the RPC's response message — `response_body` makes it a bare field value, which no message matcher can express."
+            },
+            "raw_messages": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "REST/WebSocket twin of `raw_body`: assert each streamed message's JSON verbatim."
+            },
             "received_count": {
               "type": "integer",
               "description": "ClientStream only: how many request messages the server reports having received (ClientStreamResponse.received_count). Without this, a client-streaming case proves nothing about messages after the first — the response payload comes from the FIRST request's ResponseDefinition either way."

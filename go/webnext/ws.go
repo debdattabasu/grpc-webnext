@@ -566,7 +566,12 @@ func (h *handler) runStream(r *http.Request, c *wsConn, s *wsStream, sub *pb.Sub
 					break
 				}
 				if tc != nil {
-					encoded, err := tc.ResponseProtoToJSON(path, message)
+					// An annotation route may name a single response field.
+					responseBody := ""
+					if ann != nil {
+						responseBody = ann.responseBody()
+					}
+					encoded, err := tc.ResponseProtoToJSONBody(path, message, responseBody)
 					if err != nil {
 						h.rejectStream(c, s, jsonCodec, codes.Internal, "json encode: "+err.Error())
 						return

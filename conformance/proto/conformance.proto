@@ -89,6 +89,19 @@ service ConformanceService {
       additional_bindings { post: "/v1/rest/{payload}" body: "*" }
       additional_bindings { get: "/v1/rest/skip/*/{payload}" }
       additional_bindings { get: "/v1/rest/tail/{payload}/**" }
+      // `response_body` returns ONE top-level response field instead of the whole
+      // message, so these two answer a bare JSON value: `payload` is `bytes`, whose
+      // protobuf-JSON form is a base64 string. The POST twin exists to reach the
+      // *unset* case, where whole-message encoding would have skipped the field.
+      //
+      // The `/v1/rest-body` prefix is deliberate, not cosmetic: `/v1/rest/body`
+      // would have three segments and so be matched FIRST by the
+      // `post: "/v1/rest/{payload}"` binding above, silently binding payload="body".
+      // Bindings resolve in declaration order with no specificity ranking (see
+      // spec/PROTOCOL.md), so a new binding must not be a shape an earlier one
+      // already covers.
+      additional_bindings { get: "/v1/rest-body/{payload}" response_body: "payload" }
+      additional_bindings { post: "/v1/rest-body" body: "*" response_body: "payload" }
     };
   }
 
@@ -96,7 +109,13 @@ service ConformanceService {
   // path and query, and the server injects it on the client's behalf. This is the
   // GET-style annotated stream, the trickiest REST shape on the WebSocket surface.
   rpc RestServerStream(RestStreamRequest) returns (stream ConformancePayload) {
-    option (google.api.http) = { get: "/v1/rest-stream/{payload}" };
+    option (google.api.http) = {
+      get: "/v1/rest-stream/{payload}"
+      // `response_body` applies **per message** on a stream, not once to the whole
+      // stream — the only sensible reading, and the one worth pinning across
+      // implementations.
+      additional_bindings { get: "/v1/rest-stream-body/{payload}" response_body: "payload" }
+    };
   }
 }
 

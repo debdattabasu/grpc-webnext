@@ -14,6 +14,7 @@
 package webnext
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -119,6 +120,14 @@ func (t *Transcoder) RequestJSONToProto(path string, jsonBytes []byte) ([]byte, 
 
 // ResponseProtoToJSON converts a binary protobuf response message into JSON.
 func (t *Transcoder) ResponseProtoToJSON(path string, protoBytes []byte) ([]byte, error) {
+	return t.ResponseProtoToJSONBody(path, protoBytes, "")
+}
+
+// ResponseProtoToJSONBody converts a binary protobuf response message into JSON,
+// honoring a binding's `response_body`: when it names a (top-level) field, the
+// JSON is **that field's value** rather than the whole message. An empty name is
+// the ordinary whole-message encoding.
+func (t *Transcoder) ResponseProtoToJSONBody(path string, protoBytes []byte, responseBody string) ([]byte, error) {
 	m, ok := t.method(path)
 	if !ok {
 		return nil, fmt.Errorf("webnext: unknown method %s", path)
@@ -127,5 +136,67 @@ func (t *Transcoder) ResponseProtoToJSON(path string, protoBytes []byte) ([]byte
 	if err := proto.Unmarshal(protoBytes, msg); err != nil {
 		return nil, fmt.Errorf("webnext: decode proto response: %w", err)
 	}
-	return (protojson.MarshalOptions{}).Marshal(msg)
+	whole, err := (protojson.MarshalOptions{}).Marshal(msg)
+	if err != nil || responseBody == "" {
+		return whole, err
+	}
+
+	fd := fieldByAnyName(m.Output(), responseBody)
+	if fd == nil {
+		return nil, fmt.Errorf("webnext: unknown response_body field: %s", responseBody)
+	}
+	// Encode the whole message with the library's own rules, then lift out the one
+	// member. Doing it this way rather than serializing the field value directly is
+	// deliberate: neither protojson nor prost-reflect can encode a lone value, and
+	// re-deriving protobuf-JSON's scalar rules by hand (64-bit as a string, bytes as
+	// base64, enums by name) in two languages is exactly where the implementations
+	// would drift apart.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(whole, &obj); err != nil {
+		return nil, fmt.Errorf("webnext: re-read response json: %w", err)
+	}
+	if value, ok := obj[fd.JSONName()]; ok {
+		return value, nil
+	}
+	return jsonZero(fd), nil
+}
+
+// jsonZero is the JSON a field carries when it is **absent** from the encoded
+// message.
+//
+// Whole-message encoding skips default values, so lifting a member out can come
+// up empty — but `response_body` promises a body, and a zero is not "no answer".
+// This is the one place protobuf-JSON's rules are restated by hand, so it is kept
+// to exactly the zero case, and mirrored field-for-field by the Rust
+// implementation (`json_zero` in `rust/.../src/transcode.rs`).
+func jsonZero(fd protoreflect.FieldDescriptor) []byte {
+	switch {
+	case fd.IsList():
+		return []byte("[]")
+	case fd.IsMap():
+		return []byte("{}")
+	}
+	switch fd.Kind() {
+	// An unset message field is null, not `{}` — it was never there.
+	case protoreflect.MessageKind, protoreflect.GroupKind:
+		return []byte("null")
+	// Empty strings and empty bytes (whose base64 is empty) are both `""`.
+	case protoreflect.StringKind, protoreflect.BytesKind:
+		return []byte(`""`)
+	case protoreflect.BoolKind:
+		return []byte("false")
+	// 64-bit integers are JSON *strings* in protobuf-JSON, zero included.
+	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind,
+		protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
+		return []byte(`"0"`)
+	// An enum encodes as its value's name; number 0 is the default by definition
+	// in proto3, but fall back to the number if it has none.
+	case protoreflect.EnumKind:
+		if v := fd.Enum().Values().ByNumber(0); v != nil {
+			return []byte(`"` + string(v.Name()) + `"`)
+		}
+		return []byte("0")
+	default:
+		return []byte("0")
+	}
 }

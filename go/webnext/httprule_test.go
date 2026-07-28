@@ -11,6 +11,9 @@ package webnext
 import (
 	"testing"
 
+	"github.com/grpc-webnext/grpc-webnext/go/internal/protoset"
+	testechopb "github.com/grpc-webnext/grpc-webnext/go/internal/testecho/testechopb"
+
 	"google.golang.org/genproto/googleapis/api/annotations"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -644,4 +647,106 @@ func TestBareWildcardSegments(t *testing.T) {
 	if _, ok := matchSegments(rest, "", "/v1/things/7"); !ok {
 		t.Error("a trailing `**` should match an empty remainder")
 	}
+}
+
+// --- response_body ------------------------------------------------------------
+
+// The zero-value table is the ONE place protobuf-JSON's rules are restated by
+// hand (whole-message encoding skips defaults, so lifting a member out can come up
+// empty). It is therefore the likeliest place for the two implementations to
+// drift, and every kind is pinned here — with `json_zero` in
+// rust/.../src/transcode.rs asserting the identical table.
+func TestJSONZeroPerKind(t *testing.T) {
+	input := fixtureMessage(t)
+	fields := input.Fields()
+
+	cases := map[string]string{
+		"name":       `""`,                  // string
+		"count":      `0`,                   // uint32
+		"big":        `"0"`,                 // int64 — a JSON *string* in protobuf-JSON
+		"ratio":      `0`,                   // double
+		"flag":       `false`,               // bool
+		"blob":       `""`,                  // bytes — the empty base64 string
+		"color":      `"COLOR_UNSPECIFIED"`, // enum — by name, not number
+		"nested":     `null`,                // an unset message was never there
+		"tags":       `[]`,                  // repeated
+		"some_field": `""`,
+	}
+	for name, want := range cases {
+		fd := fields.ByName(protoreflect.Name(name))
+		if fd == nil {
+			t.Fatalf("fixture has no field %q", name)
+		}
+		if got := string(jsonZero(fd)); got != want {
+			t.Errorf("jsonZero(%s) = %s, want %s", name, got, want)
+		}
+	}
+}
+
+// Extraction end to end: `response_body` returns the named field's value, encoded
+// by the library's own rules, and falls back to the zero when the field is absent.
+func TestResponseBodyExtraction(t *testing.T) {
+	fds, err := testechoDescriptorSet()
+	if err != nil {
+		t.Fatalf("descriptor set: %v", err)
+	}
+	tc, err := NewTranscoder(fds)
+	if err != nil {
+		t.Fatalf("transcoder: %v", err)
+	}
+	const method = "/echo.v1.Echo/Unary" // returns EchoResponse{ message: string }
+
+	// A populated field comes back as its bare JSON value, not wrapped.
+	resp, err := proto.Marshal(dynamicResponse(t, tc, method, "hi"))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := tc.ResponseProtoToJSONBody(method, resp, "message")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if string(got) != `"hi"` {
+		t.Errorf("body = %s, want \"hi\"", got)
+	}
+
+	// The whole message is still the default.
+	if got, err = tc.ResponseProtoToJSON(method, resp); err != nil || string(got) != `{"message":"hi"}` {
+		t.Errorf("whole message = %s (err %v), want {\"message\":\"hi\"}", got, err)
+	}
+
+	// An absent field falls back to its zero rather than vanishing: an empty
+	// message encodes as `{}`, so there is no member to lift.
+	empty, err := proto.Marshal(dynamicResponse(t, tc, method, ""))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got, err = tc.ResponseProtoToJSONBody(method, empty, "message"); err != nil || string(got) != `""` {
+		t.Errorf("absent field = %s (err %v), want \"\"", got, err)
+	}
+
+	// A name that is no field at all is an error, not a silent whole-message answer.
+	if _, err = tc.ResponseProtoToJSONBody(method, resp, "nope"); err == nil {
+		t.Error("unknown response_body field should be an error")
+	}
+}
+
+// dynamicResponse builds the method's response message with `message` set.
+func dynamicResponse(t *testing.T, tc *Transcoder, method, message string) *dynamicpb.Message {
+	t.Helper()
+	m, ok := tc.method(method)
+	if !ok {
+		t.Fatalf("no method %s", method)
+	}
+	msg := dynamicpb.NewMessage(m.Output())
+	fd := msg.Descriptor().Fields().ByName("message")
+	if message != "" {
+		msg.Set(fd, protoreflect.ValueOfString(message))
+	}
+	return msg
+}
+
+// testechoDescriptorSet is the echo.proto closure, used here for a real service's
+// response types (the synthetic fixture above has no service to key a method on).
+func testechoDescriptorSet() ([]byte, error) {
+	return protoset.Marshal(testechopb.File_echo_proto)
 }

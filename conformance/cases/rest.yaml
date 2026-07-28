@@ -203,6 +203,58 @@ cases:
       response:
         payload: { text: "hello" }
 
+  # --- response_body: the body is ONE field, not the whole message --------------
+  #
+  # These are the only cases whose body is not a ConformancePayload, which is why
+  # they assert `raw_body` / `raw_messages` — a message matcher has nothing to
+  # decode when the answer is a bare JSON value.
+
+  # `response_body: "payload"` on a `bytes` field: the body is that field's
+  # protobuf-JSON form, a base64 string, and nothing else.
+  - name: response-body-field
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest-body/hello
+    expect:
+      status: { code: 0 }
+      raw_body: '"aGVsbG8="'
+
+  # The unset case, which is where the two implementations could most easily
+  # disagree: whole-message encoding SKIPS a default field, so there is no member
+  # to lift and the zero has to be supplied. For `bytes` that is `""`, not `null`
+  # and not an omitted body.
+  - name: response-body-field-unset
+    rpc: Unary
+    rest:
+      verb: POST
+      path: /v1/rest-body
+      body: '{"payload":""}'
+    expect:
+      status: { code: 0 }
+      raw_body: '""'
+
+  # An error still carries no body, and the status is unaffected by response_body.
+  - name: response-body-error-has-no-body
+    rpc: Unary
+    rest:
+      verb: GET
+      path: /v1/rest-body/x?status_code=7
+    expect:
+      status: { code: 7 }
+      raw_body: ""
+
+  # On a stream, `response_body` applies **per message** — each frame carries the
+  # extracted field, not the whole payload message.
+  - name: response-body-per-stream-message
+    rpc: ServerStream
+    rest:
+      verb: GET
+      path: /v1/rest-stream-body/tick?count=2
+    expect:
+      status: { code: 0 }
+      raw_messages: ['"dGljaw=="', '"dGljaw=="']
+
   # --- streaming: an annotated URL is a WebSocket ------------------------------
 
   # A streaming method's annotation URL is a WebSocket endpoint. This binding is

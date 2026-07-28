@@ -12,16 +12,16 @@
 //!     `*` / `**` wildcards that match without capturing, and dotted field paths
 //!     (`{a.b}`) binding nested fields,
 //!   * `body: "*"` (whole message), `body: "<field>"` (a sub-message field), or none,
+//!   * `response_body` — answer with one top-level response field (see `transcode.rs`),
 //!   * query params bound to (possibly nested) scalar/repeated fields, keyed by
 //!     either the `.proto` field name or its JSON (lowerCamelCase) name.
 //!
 //! `go/webnext/httprule.go` is the deliberately parallel port of this file — same
 //! segment/body model, same matching order, same coercion table — so the two
 //! implementations can be compared side by side. The unsupported surface is
-//! identical and enumerated in `doc/HTTPRULE_GAPS.md`: `response_body`,
-//! `HttpRule.selector` (service-config rules), multi-segment patterns such as
-//! `{name=shelves/*}`, non-scalar query binding, and scalar/repeated/dotted body
-//! fields.
+//! identical and enumerated in `doc/HTTPRULE_GAPS.md`: `HttpRule.selector`
+//! (service-config rules), multi-segment patterns such as `{name=shelves/*}`,
+//! non-scalar query binding, and scalar/repeated/dotted body fields.
 
 use prost_reflect::prost::Message;
 use prost_reflect::{
@@ -70,6 +70,9 @@ struct Binding {
     /// It is *matched*, not merely stripped — see [`match_segments`].
     custom_verb: String,
     body: BodyRule,
+    /// `response_body` — the top-level response field to return instead of the
+    /// whole message. Empty means the whole message.
+    response_body: String,
     grpc_method: String, // "/pkg.Service/Method"
     input: MessageDescriptor,
 }
@@ -82,6 +85,9 @@ type PathVar = (Vec<String>, String);
 pub struct HttpCall {
     pub grpc_method: String,
     pub message: Vec<u8>,
+    /// The binding's `response_body`, empty for the whole message. Carried on the
+    /// call because the response is encoded long after the binding is matched.
+    pub response_body: String,
 }
 
 /// A WebSocket route resolved from an annotation URL: the target gRPC method plus
@@ -102,6 +108,12 @@ impl WsBinding {
     /// where the request comes entirely from the URL (path + query).
     pub fn has_body(&self) -> bool {
         !matches!(self.binding.body, BodyRule::None)
+    }
+
+    /// The binding's `response_body` — the top-level response field to return
+    /// instead of the whole message. Empty means the whole message.
+    pub fn response_body(&self) -> &str {
+        &self.binding.response_body
     }
 
     /// Build a request message from a body payload, overlaying the URL path/query.
@@ -192,7 +204,11 @@ impl HttpRouter {
             return Ok(None);
         };
         let message = build_message(binding, &vars, query, body)?;
-        Ok(Some(HttpCall { grpc_method: binding.grpc_method.clone(), message }))
+        Ok(Some(HttpCall {
+            grpc_method: binding.grpc_method.clone(),
+            message,
+            response_body: binding.response_body.clone(),
+        }))
     }
 }
 
@@ -220,6 +236,10 @@ fn push_binding(bindings: &mut Vec<Binding>, rule: &DynamicMessage, grpc_method:
         segments,
         custom_verb,
         body: body_rule(rule),
+        response_body: rule
+            .get_field_by_name("response_body")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default(),
         grpc_method: grpc_method.to_string(),
         input: input.clone(),
     });
@@ -404,7 +424,7 @@ fn deserialize_message(desc: MessageDescriptor, json: &[u8]) -> Result<DynamicMe
 /// both resolve. grpc-gateway does the same. The proto name wins on a collision,
 /// which can only happen if a message deliberately names one field like another's
 /// JSON name.
-fn field_by_any_name(desc: &MessageDescriptor, name: &str) -> Option<FieldDescriptor> {
+pub(crate) fn field_by_any_name(desc: &MessageDescriptor, name: &str) -> Option<FieldDescriptor> {
     desc.get_field_by_name(name).or_else(|| desc.get_field_by_json_name(name))
 }
 

@@ -16,8 +16,8 @@ written to be structurally parallel to the Rust one so a reader can diff them, a
 gaps are properties of the shared design rather than of one language. Where a gap is
 pinned by a test, the test is named — those tests assert *current* behavior, so adding
 support means changing them, which is the tripwire that keeps this document honest. It
-has already worked twice: the two entries closed on 2026-07-28 announced themselves as
-failing tests, not as someone remembering to reread this page.
+has already worked: every entry closed on 2026-07-28 announced itself as a failing test,
+not as someone remembering to reread this page.
 
 ## Supported
 
@@ -35,6 +35,7 @@ failing tests, not as someone remembering to reread this page.
 | Dotted capture paths — `{user.id}` | Binds nested message fields |
 | `body: "*"` | The whole JSON body is the request message |
 | `body: "<field>"` | A singular message-typed field |
+| `response_body` | The body is that top-level response field's value; **per message** on a stream |
 | No body | The request is built entirely from path + query |
 | Query params → scalar fields | Including nested (`a.b=x`) and repeated (`t=1&t=2`) |
 | Enum query/path values | By name or by number |
@@ -89,27 +90,42 @@ hand-written (in an annotation template by the service author, in a query string
 caller) and both conventions turn up, so both now resolve, proto name first. This is a
 compatible widening: every URL that worked before still works.
 
-## Gaps that give a wrong answer
+### `response_body` *(2026-07-28)*
 
-Only one, and it is the one to fix first, because nothing about it looks broken.
+`response_body: "resource"` should return only that field of the response message. Neither
+router read the option: the binding compiled as if it were absent and the **whole** message
+came back — the route worked, the status was `OK`, and the JSON was simply the wrong shape.
+It was the last gap that returned a *wrong answer* rather than no answer.
 
-### `response_body` is silently ignored
+Two things made it more than a 20-line change, and both are worth knowing before touching
+this code again:
 
-`response_body: "resource"` should return only that field of the response message.
-Neither router reads the option: the binding compiles as if it were absent and the
-**whole** response message comes back. The route works, the status is `OK`, and the
-JSON is simply the wrong shape.
+- **The binding was thrown away before the response was encoded.** The Fetch path resolved
+  it, took the method and the request message, and dropped the rest; the response step had
+  only a method path. `response_body` now rides on `HttpCall`/`httpCall` and `WsBinding`/
+  `wsBinding` to reach both response sites.
+- **Neither JSON library can encode a lone field value.** `protojson.Marshal` takes a
+  message; prost-reflect serializes `DynamicMessage` only. Re-deriving protobuf-JSON's
+  scalar rules by hand — 64-bit as a *string*, bytes as base64, enums by name — twice,
+  identically, is exactly how two implementations drift. So both encode the **whole**
+  message with the library's own rules and lift out the one member, which reuses those
+  rules verbatim.
 
-Implementing it means extracting a field from the response message before the
-proto→JSON step — straightforward for unary, and it needs a decision for streaming
-(apply per message, presumably). Worth doing; nothing depends on it yet.
+  That leaves one hand-written rule: whole-message encoding **skips defaults**, so a field
+  at its zero has no member to lift — and `response_body` promises a body, where a zero is
+  not "no answer". Hence a zero-value table (`json_zero` / `jsonZero`), kept to exactly that
+  case and pinned kind-for-kind on both sides
+  (`transcode::tests::json_zero_per_kind`, `TestJSONZeroPerKind`). If you add a kind,
+  add it to both.
 
-*Pinned by `TestUnsupportedResponseBody`.*
+Covered end to end by `response-body-field`, `response-body-field-unset`,
+`response-body-error-has-no-body`, and `response-body-per-stream-message`.
 
 ## Gaps that fail closed
 
-These produce no route, or an explicit `INVALID_ARGUMENT` — never a wrong answer. That
-makes them cheap to live with.
+**Every remaining gap is in this category.** Each produces no route, or an explicit
+`INVALID_ARGUMENT` — never a wrong answer. That makes them cheap to live with, and it is
+the property to preserve when adding to this list.
 
 ### `HttpRule.selector` and service-config rules
 
