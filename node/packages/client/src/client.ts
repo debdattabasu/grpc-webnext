@@ -6,6 +6,7 @@ import {
   RequestCallback,
   statusToError,
 } from "./call.js";
+import type { ConnectivityListener, ConnectivityState } from "./connectivity.js";
 import { CallContext, createCallContext, statusForAbort } from "./context.js";
 import { FetchTransport } from "./fetch-transport.js";
 import { Metadata } from "./metadata.js";
@@ -170,6 +171,36 @@ export class Client {
   close(): void {
     this.unaryTransport.close();
     this.streamTransport.close();
+  }
+
+  /**
+   * The channel's connectivity state, or `undefined` when the configured transport
+   * keeps no persistent connection.
+   *
+   * That `undefined` is the honest answer, not a gap: only h2ts has a channel to
+   * report on. Fetch is stateless, and the custom `Frame` path opens one WebSocket
+   * per stream — a call there brings its own connection, so there is nothing that
+   * could be "down" between calls. An app can read `undefined` as "no banner to
+   * show".
+   */
+  getConnectivityState(): ConnectivityState | undefined {
+    return this.channel?.current;
+  }
+
+  /**
+   * Watch connectivity transitions; returns an unsubscribe. Repeats are collapsed,
+   * so every call is a real change. A no-op (and never fires) on a transport with
+   * no persistent connection — see {@link getConnectivityState}.
+   *
+   * The Rust WASM client exposes the same states as `Client::state_changes`.
+   */
+  watchConnectivityState(listener: ConnectivityListener): () => void {
+    return this.channel?.watch(listener) ?? (() => {});
+  }
+
+  /** The transport that owns a persistent connection, if any. */
+  private get channel() {
+    return this.streamTransport.connectivity ?? this.unaryTransport.connectivity;
   }
 
   makeUnaryRequest<Req, Res>(

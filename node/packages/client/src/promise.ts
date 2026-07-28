@@ -1,4 +1,5 @@
 import { Client, ClientOptions } from "./client.js";
+import type { ConnectivityListener, ConnectivityState } from "./connectivity.js";
 import { Metadata } from "./metadata.js";
 import { methodCodec, type MethodInfo, type Serializer, type ServiceDefinition } from "./service.js";
 import type { StatusResult } from "./transport.js";
@@ -44,7 +45,13 @@ type PromiseMethodFn<M extends MethodInfo> = M["requestStream"] extends false
 /** The promise-based client surface for a service definition. */
 export type PromiseServiceClient<Def extends ServiceDefinition> = {
   [K in keyof Def["methods"]]: PromiseMethodFn<Def["methods"][K]>;
-} & { close(): void };
+} & {
+  close(): void;
+  /** See {@link Client.getConnectivityState}. */
+  getConnectivityState(): ConnectivityState | undefined;
+  /** See {@link Client.watchConnectivityState}. */
+  watchConnectivityState(listener: ConnectivityListener): () => void;
+};
 
 /**
  * Build a promise-based client from a ts-proto service definition. Unary and
@@ -57,7 +64,11 @@ export function makePromiseClient<Def extends ServiceDefinition>(
   options: ClientOptions,
 ): PromiseServiceClient<Def> {
   const client = new Client(options);
-  const result: Record<string, unknown> = { close: () => client.close() };
+  const result: Record<string, unknown> = {
+    close: () => client.close(),
+    getConnectivityState: () => client.getConnectivityState(),
+    watchConnectivityState: (l: ConnectivityListener) => client.watchConnectivityState(l),
+  };
 
   for (const key of Object.keys(definition.methods)) {
     const m = definition.methods[key];

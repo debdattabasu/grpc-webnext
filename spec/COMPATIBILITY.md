@@ -25,6 +25,7 @@ alike — the conformance matrix runs the same cases against each.
 | Subchannel = managed transport connection | ✅ | ✅ | ⚠️ logical URL bucket; state **inferred** from responses, browser owns the socket pool | ✅ subchannel = a `WebSocket`, **real** connection state |
 | Keepalive pings (`GRPC_ARG_KEEPALIVE_*`) | ✅ | ✅ | ⛔ browser owns the connection; no JS access to h2 PING | ⚠️ native WS ping/pong control frames, **server-driven** |
 | DNS fan-out under one authority (many IPs → many subchannels) | ✅ | ✅ | ⛔ no per-IP pinning; resolver must emit distinct URLs | ⛔ same |
+| Connectivity state (`GetState` / `WaitForStateChange`) | ✅ | ✅ | ⛔ no channel to report on — stateless | ⚠️ **real on h2ts**; ⛔ on the custom `Frame` path, which has no persistent connection |
 | Receive-side flow control (a slow consumer blocks the *server*) | ✅ | ✅ | ⛔ inert — one message, already buffered | ⚠️ **real on h2ts** (HTTP/2 `WINDOW_UPDATE`); ⛔ on the custom `Frame` path — messages queue client-side |
 
 ## Why the browser diverges

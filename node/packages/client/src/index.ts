@@ -1,4 +1,6 @@
 export { Client, resolveTransportSelection } from "./client.js";
+export { ConnectivityState } from "./connectivity.js";
+export type { ConnectivityListener } from "./connectivity.js";
 export type {
   CallOptions,
   ClientOptions,

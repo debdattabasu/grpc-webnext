@@ -6,6 +6,7 @@ import {
   RequestCallback,
 } from "./call.js";
 import { CallOptions, Client, ClientOptions } from "./client.js";
+import type { ConnectivityListener, ConnectivityState } from "./connectivity.js";
 import { Metadata } from "./metadata.js";
 
 /** Minimal message serializer shape (satisfied by ts-proto message types). */
@@ -95,7 +96,13 @@ type MethodFn<M extends MethodInfo> = M["requestStream"] extends false
 /** The generated client surface for a service definition. */
 export type ServiceClient<Def extends ServiceDefinition> = {
   [K in keyof Def["methods"]]: MethodFn<Def["methods"][K]>;
-} & { close(): void };
+} & {
+  close(): void;
+  /** See {@link Client.getConnectivityState}. */
+  getConnectivityState(): ConnectivityState | undefined;
+  /** See {@link Client.watchConnectivityState}. */
+  watchConnectivityState(listener: ConnectivityListener): () => void;
+};
 
 /**
  * Build a typed, grpc-js-shaped client from a ts-proto service definition,
@@ -107,7 +114,11 @@ export function makeClient<Def extends ServiceDefinition>(
   options: ClientOptions,
 ): ServiceClient<Def> {
   const client = new Client(options);
-  const result: Record<string, unknown> = { close: () => client.close() };
+  const result: Record<string, unknown> = {
+    close: () => client.close(),
+    getConnectivityState: () => client.getConnectivityState(),
+    watchConnectivityState: (l: ConnectivityListener) => client.watchConnectivityState(l),
+  };
 
   for (const key of Object.keys(definition.methods)) {
     const m = definition.methods[key];

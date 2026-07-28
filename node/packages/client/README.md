@@ -114,6 +114,31 @@ interface ClientOptions {
 }
 ```
 
+## Connectivity
+
+The default transport keeps one HTTP/2 tunnel, and its state is observable — gRPC's
+connectivity states, the same ones the [Rust WASM client](https://crates.io/crates/grpc-webnext-client)
+reports:
+
+```ts
+import { ConnectivityState } from "@grpc-webnext/client";
+
+client.getConnectivityState();          // IDLE | CONNECTING | READY | TRANSIENT_FAILURE
+const stop = client.watchConnectivityState((state) => {
+  setOffline(state === ConnectivityState.TRANSIENT_FAILURE);
+});
+stop();                                  // unsubscribe
+```
+
+Every callback is a real transition — repeats are collapsed — and `IDLE` fires on the
+*disconnect*, not just before the redial, so a reconnect is distinguishable from a first
+connect.
+
+`getConnectivityState()` returns **`undefined`** on `streaming: "ws"` and `codec: "json"`,
+and that is the honest answer rather than a gap: Fetch is stateless and the custom `Frame`
+path opens one WebSocket per stream, so there is no channel that could be "down" between
+calls. Read `undefined` as "no banner to show".
+
 ## Reconnecting and retries
 
 **A dropped connection heals itself.** Every call on the default transport rides one

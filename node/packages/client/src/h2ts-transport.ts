@@ -6,6 +6,7 @@
 import { connectWebSocket } from "@debdattabasu/h2ts";
 import type { H2Connection, H2Response, WebSocketConnectOptions } from "@debdattabasu/h2ts";
 
+import { ConnectivityState, ConnectivityWatch } from "./connectivity.js";
 import { statusForAbort } from "./context.js";
 import { Metadata } from "./metadata.js";
 import { Status } from "./status.js";
@@ -36,6 +37,8 @@ export class H2tsTransport implements Transport {
   private readonly webSocketImpl?: typeof WebSocket;
   private tunnel: Tunnel | null = null;
   private closed = false;
+  /** The one transport with a real channel to report on. */
+  readonly connectivity = new ConnectivityWatch();
 
   constructor(options: H2tsTransportOptions) {
     const url = new URL(options.baseUrl);
@@ -62,19 +65,30 @@ export class H2tsTransport implements Transport {
     const opts: WebSocketConnectOptions = {
       WebSocket: this.webSocketImpl as WebSocketConnectOptions["WebSocket"],
     };
+    // The IDLE that precedes this comes from `die` below, which fires the moment the
+    // connection closes — a watcher needs it to tell a reconnect from a first
+    // connect. There is deliberately no second IDLE here: anything that clears
+    // `alive` also clears `this.tunnel`, so a "dead but still cached" tunnel cannot
+    // exist to notice.
+    this.connectivity.set(ConnectivityState.CONNECTING);
     const tunnel: Tunnel = { alive: true, connection: undefined as never };
     tunnel.connection = connectWebSocket(this.wsUrl, opts).then(
       (connection) => {
         const die = () => {
           tunnel.alive = false;
-          if (this.tunnel === tunnel) this.tunnel = null;
+          if (this.tunnel === tunnel) {
+            this.tunnel = null;
+            if (!this.closed) this.connectivity.set(ConnectivityState.IDLE);
+          }
         };
         connection.closed.then(die, die);
+        this.connectivity.set(ConnectivityState.READY);
         return connection;
       },
       (e) => {
         tunnel.alive = false;
         if (this.tunnel === tunnel) this.tunnel = null;
+        this.connectivity.set(ConnectivityState.TRANSIENT_FAILURE);
         throw e;
       },
     );

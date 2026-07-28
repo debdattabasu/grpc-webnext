@@ -15,9 +15,14 @@ import net from "node:net";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { makePromiseClient, Status, type PromiseServiceClient } from "../src/index.js";
+import {
+  ConnectivityState,
+  makePromiseClient,
+  Status,
+  type PromiseServiceClient,
+} from "../src/index.js";
 import { ConformanceServiceDefinition } from "./gen/conformance.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -150,4 +155,87 @@ describe("h2ts tunnel recovery", () => {
     relay.down = false;
     expect((await client.unary(echo("yes"))).payload).toEqual(new TextEncoder().encode("yes"));
   }, 60_000);
+});
+
+describe("connectivity state", () => {
+  let proc: ChildProcess;
+  let relay: Relay;
+  let relayPort: number;
+  let client: PromiseServiceClient<typeof ConformanceServiceDefinition>;
+
+  beforeAll(async () => {
+    const server = await spawnServer();
+    proc = server.proc;
+    relay = new Relay(server.port);
+    const port = (relayPort = await relay.listen());
+    client = makePromiseClient(ConformanceServiceDefinition, {
+      baseUrl: `http://127.0.0.1:${port}`,
+      webSocketImpl: wsImpl,
+    });
+  }, 180_000);
+
+  afterAll(() => {
+    client?.close();
+    relay?.stop();
+    proc?.kill("SIGKILL");
+  });
+
+  it("reports transitions, and tells a reconnect from a first connect", async () => {
+    const seen: ConnectivityState[] = [];
+    const stop = client.watchConnectivityState((s) => seen.push(s));
+
+    expect(client.getConnectivityState()).toBe(ConnectivityState.IDLE);
+    await client.unary(echo("one"));
+    expect(client.getConnectivityState()).toBe(ConnectivityState.READY);
+    expect(seen).toEqual([ConnectivityState.CONNECTING, ConnectivityState.READY]);
+
+    relay.cut();
+    // The drop itself is an event — without it a watcher could not distinguish
+    // "reconnected" from "connected for the first time", which is the difference
+    // between "we blipped" and "we just started".
+    await vi.waitFor(() => expect(seen).toContain(ConnectivityState.IDLE), { timeout: 5000 });
+
+    await client.unary(echo("two"));
+    expect(client.getConnectivityState()).toBe(ConnectivityState.READY);
+    expect(seen.slice(-3)).toEqual([
+      ConnectivityState.IDLE,
+      ConnectivityState.CONNECTING,
+      ConnectivityState.READY,
+    ]);
+
+    stop();
+    const before = seen.length;
+    relay.cut();
+    await client.unary(echo("three"));
+    expect(seen.length, "unsubscribe should stop delivery").toBe(before);
+  }, 60_000);
+
+  it("reports TRANSIENT_FAILURE when the endpoint is down, and recovers", async () => {
+    const down = new Relay(1);
+    const port = await down.listen();
+    down.down = true;
+    const flaky = makePromiseClient(ConformanceServiceDefinition, {
+      baseUrl: `http://127.0.0.1:${port}`,
+      webSocketImpl: wsImpl,
+    });
+    await expect(flaky.unary(echo("x"))).rejects.toThrow();
+    expect(flaky.getConnectivityState()).toBe(ConnectivityState.TRANSIENT_FAILURE);
+    flaky.close();
+    down.stop();
+  }, 60_000);
+
+  it("is undefined where there is no channel to report on", async () => {
+    // Fetch is stateless and the custom `Frame` path opens a socket per stream, so
+    // neither has a connection whose state could be "down" between calls. Saying
+    // undefined is the honest answer; claiming READY would be a fiction.
+    const ws = makePromiseClient(ConformanceServiceDefinition, {
+      baseUrl: `http://127.0.0.1:${relayPort}`,
+      webSocketImpl: wsImpl,
+      unary: "fetch",
+      streaming: "ws",
+    });
+    expect(ws.getConnectivityState()).toBeUndefined();
+    expect(typeof ws.watchConnectivityState(() => {})).toBe("function"); // no-op, not a throw
+    ws.close();
+  });
 });

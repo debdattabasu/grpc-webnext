@@ -1,3 +1,4 @@
+import type { ConnectivityWatch } from "./connectivity.js";
 import type { Metadata } from "./metadata.js";
 import type { Status } from "./status.js";
 
@@ -59,4 +60,12 @@ export interface Transport {
   unary(path: string, request: Uint8Array, options: TransportCallOptions): Promise<UnaryResponse>;
   startStream(path: string, options: TransportCallOptions, handlers: StreamHandlers): StreamCall;
   close(): void;
+  /**
+   * Connectivity, for a transport that keeps a **persistent connection** — only
+   * h2ts. Absent on the others, and that absence is the honest answer rather than
+   * an omission: Fetch is stateless, and the custom `Frame` path opens one
+   * WebSocket per stream, so on those paths there is no channel whose state could
+   * be reported. See `Client.getConnectivityState`.
+   */
+  readonly connectivity?: ConnectivityWatch;
 }
