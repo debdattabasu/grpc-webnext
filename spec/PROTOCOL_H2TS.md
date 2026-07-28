@@ -103,7 +103,7 @@ custom path**:
 
 ## What grpc-webnext adds
 
-Three things, and only three. Each is wire-observable, so each is normative.
+Four things, and only four. Each is wire-observable, so each is normative.
 
 ### Request message size limit
 
@@ -115,6 +115,21 @@ streams past — nothing is buffered to measure it — and fails the stream with
 This is ordinary gRPC behavior (every gRPC server has a max-receive-size), so a stock client
 needs no special handling. Response size is **not** bounded: the server's own gRPC stack owns
 that, and unlike the custom path there is no framing reason to care.
+
+### Deadline enforcement
+
+An in-process server **enforces `grpc-timeout`**: past the deadline the call is dropped and
+answered `DEADLINE_EXCEEDED`. It has to do this itself. h2ts is a byte pipe that never parses
+a header, and the piece of tonic that honors `grpc-timeout` belongs to tonic's own hyper
+server — which this path deliberately does not use, because owning the HTTP/2 connection is
+what makes the `GOAWAY` below possible. Absent this, a deadline would be received and
+ignored: the caller gives up while the handler runs on, which is exactly what the Fetch and
+custom-`Frame` paths never allow.
+
+The header is still passed through unchanged, so a handler that wants to see its own deadline
+can. **The proxy is the exception**, for the same reason as draining below: a byte-transparent
+pump cannot read a header it refuses to parse, and there the *upstream* enforces the deadline
+it is sent.
 
 ### Keepalive
 

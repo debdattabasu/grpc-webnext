@@ -1,5 +1,18 @@
 # Protocol conformance status
 
+> **Note (2026-07-29):** writing the **Rust WASM client** found a real server gap, and found
+> it the way the audit process expects — a test asserting the obvious thing and getting the
+> wrong answer. The h2ts path **received `grpc-timeout` and ignored it**: h2ts is a byte pipe
+> that never parses a header, and tonic's own timeout layer lives in the hyper server this
+> path deliberately does not use (owning the connection is what lets a drain send a real
+> `GOAWAY`). So a 100 ms deadline against a 5-second handler returned `"awake"` after five
+> seconds — the caller gives up, the handler runs on. The Fetch and custom-`Frame` paths had
+> always enforced it, so this was a **path asymmetry**, invisible to the TypeScript client
+> because it self-enforces deadlines and therefore never noticed the server didn't. Fixed in
+> `h2ts.rs`, normative in `spec/PROTOCOL_H2TS.md` ("Deadline enforcement"), pinned by
+> `the_server_enforces_grpc_timeout_on_the_h2ts_path` — which sends the header by hand with
+> no client-side timer, so only the server can end the call.
+
 > **Note (2026-07-28):** a **fourth** shared bug, found by CI rather than by an audit —
 > and only on Linux. Both servers sent the `4000 + code` rejection close and then dropped
 > the socket without reading the peer out. But a client sends the moment the handshake

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/grpc-webnext",
+    "crates/grpc-webnext-client",
     "crates/testecho",
     "crates/devserver",
     "examples/greeter-server",

@@ -15,6 +15,7 @@ doc/            design notes (STATUS, BACKLOG, UNIFICATION, H2TS_INTEGRATION, GO
                 HTTPRULE_GAPS)
 rust/           Cargo workspace  ← NOTE: the workspace is here, NOT the repo root
   crates/grpc-webnext/   server library + proxy binary (grpc-webnext-proxy)
+  crates/grpc-webnext-client/  WASM-frontend gRPC client over h2ts (no tonic/hyper/tokio)
   crates/testecho/       test-only Echo service
   crates/devserver/      dev harness (testecho behind the proxy)
   examples/greeter-server/

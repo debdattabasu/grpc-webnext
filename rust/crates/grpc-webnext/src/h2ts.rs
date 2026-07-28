@@ -57,8 +57,25 @@ pub(crate) fn serve(rt: &Runtime, req: &mut Request<Incoming>) -> Response<ResBo
                 let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                     let routes = routes.clone();
                     async move {
+                        // Enforce the client's deadline here, because nothing else on this
+                        // path will. h2ts is a byte pipe — it never parses a header — and
+                        // tonic's own `grpc-timeout` handling lives in its hyper server,
+                        // which this path deliberately does not use (we own the connection
+                        // so a drain can send a real GOAWAY). Without this, `grpc-timeout`
+                        // is received and ignored: the caller gives up while the handler
+                        // runs on, which the Fetch and custom-`Frame` paths never allow.
+                        let deadline = crate::metadata::parse_grpc_timeout(req.headers());
                         let req = req.map(|body| TonicBody::new(GrpcSizeLimit::new(body, max)));
-                        routes.oneshot(req).await
+                        match deadline {
+                            // Dropping the future is what cancels the handler; the client
+                            // gets a real trailers-only DEADLINE_EXCEEDED.
+                            Some(d) => match tokio::time::timeout(d, routes.oneshot(req)).await {
+                                Ok(result) => result,
+                                Err(_) => Ok(Status::deadline_exceeded("deadline exceeded")
+                                    .into_http()),
+                            },
+                            None => routes.oneshot(req).await,
+                        }
                     }
                 });
                 // Own the inner HTTP/2 connection rather than calling

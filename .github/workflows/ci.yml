@@ -37,6 +37,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy
+          # grpc-webnext-client targets browsers; the host build proves almost
+          # everything (h2ts-client is sans-I/O behind a pluggable transport), but
+          # only this catches a dependency that cannot reach wasm at all.
+          targets: wasm32-unknown-unknown
 
       # The Cargo workspace lives in rust/, not the repo root.
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
@@ -69,6 +73,13 @@ jobs:
       - name: Package the crate (crates.io build, vendored-proto fallback)
         working-directory: rust
         run: cargo package -p grpc-webnext --locked
+
+      # The client's whole point is running in a browser, and nothing else in the
+      # workspace compiles for that target — a native-only regression here would
+      # otherwise pass every other gate.
+      - name: Build the WASM client for wasm32
+        working-directory: rust
+        run: cargo build -p grpc-webnext-client --target wasm32-unknown-unknown --locked
 
   node:
     name: node — TS client + conformance matrix
