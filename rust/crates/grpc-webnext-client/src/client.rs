@@ -34,12 +34,15 @@ pub struct CallOptions {
     pub metadata: Metadata,
     /// Deadline for the call.
     ///
-    /// Sent as `grpc-timeout` **and** enforced locally, because on this path the
-    /// header alone guarantees nothing: the h2ts tunnel hands requests straight to
-    /// a tonic `Routes`, and the piece of tonic that honors `grpc-timeout` lives in
-    /// its own hyper server, which is not in this path. A client that only sent the
-    /// header would wait forever on a server that ignores it. The header still goes
-    /// out so anything that *does* enforce it — a proxy, an upstream — can.
+    /// Sent as `grpc-timeout` **and** enforced locally, because the header alone
+    /// guarantees nothing: it is a request to the far end, and a peer that ignores
+    /// it leaves the caller waiting forever. The header still goes out so anything
+    /// that *does* enforce it — a server, a proxy, an upstream — can.
+    ///
+    /// On a stream this covers the **whole call**, not just its opening: one timer
+    /// spans the request and every message read after it. Bounding only the open
+    /// would miss the case the deadline exists for, a peer that answers promptly and
+    /// then stalls.
     pub timeout: Option<std::time::Duration>,
     /// Reject an inbound message larger than this (RESOURCE_EXHAUSTED).
     pub max_message_bytes: Option<usize>,
@@ -260,7 +263,7 @@ impl Client {
         options: CallOptions,
     ) -> Result<Streaming, Status> {
         let body = RequestBody::Bytes(encode_message(&request));
-        Ok(Streaming::new(self.request(path, body, &options).await?, &options))
+        self.open_stream(path, body, &options).await
     }
 
     /// Bidirectional streaming: a stream out, a stream back, concurrently.
@@ -274,7 +277,48 @@ impl Client {
         S: Stream<Item = Vec<u8>> + 'static,
     {
         let body = RequestBody::stream(requests.map(|m| encode_message(&m)));
-        Ok(Streaming::new(self.request(path, body, &options).await?, &options))
+        self.open_stream(path, body, &options).await
+    }
+
+    /// Open a streaming response, with the deadline covering the **whole call**.
+    ///
+    /// One timer spans both phases: opening the stream and every message read after
+    /// it. Bounding only the open would be worse than useless here — a server that
+    /// sends headers promptly and then stalls is exactly the case a deadline is for,
+    /// and it is the case that would slip through.
+    ///
+    /// The timer is created once and handed to [`Streaming`] still running, rather
+    /// than recomputed from a start instant, because `std::time::Instant::now()`
+    /// panics on `wasm32-unknown-unknown` — there is no clock behind it. A single
+    /// live `Delay` needs no clock reads at all.
+    async fn open_stream(
+        &self,
+        path: &str,
+        body: RequestBody,
+        options: &CallOptions,
+    ) -> Result<Streaming, Status> {
+        use futures::future::{select, Either};
+
+        let Some(timeout) = options.timeout else {
+            return Ok(Streaming::new(self.request(path, body, options).await?, options, None));
+        };
+
+        let mut timer = futures_timer::Delay::new(timeout);
+        // Scoped so the borrow of `timer` ends before it is moved into the stream.
+        // `select` hands the loser back untouched, so the timer carries its
+        // *remaining* time onward instead of restarting per phase.
+        let opened = {
+            let open = self.request(path, body, options);
+            futures::pin_mut!(open);
+            match select(open, &mut timer).await {
+                Either::Left((response, _)) => Some(response),
+                Either::Right(((), _)) => None,
+            }
+        };
+        match opened {
+            Some(response) => Ok(Streaming::new(response?, options, Some(timer))),
+            None => Err(Status::new(Code::DeadlineExceeded, "deadline exceeded")),
+        }
     }
 
     /// Issue a request whose response is exactly one message, and read it to the
@@ -435,6 +479,9 @@ pub struct Streaming {
     ready: std::collections::VecDeque<Vec<u8>>,
     ended: bool,
     failed: Option<Status>,
+    /// The call's deadline, still running from before the stream opened. `None`
+    /// when the call set no timeout.
+    deadline: Option<futures_timer::Delay>,
 }
 
 impl std::fmt::Debug for Streaming {
@@ -448,7 +495,11 @@ impl std::fmt::Debug for Streaming {
 }
 
 impl Streaming {
-    fn new(response: Response, options: &CallOptions) -> Streaming {
+    fn new(
+        response: Response,
+        options: &CallOptions,
+        deadline: Option<futures_timer::Delay>,
+    ) -> Streaming {
         let headers = Metadata::from_headers(&response.headers);
         // `into_parts` is what makes a gRPC stream expressible at all: the body and
         // the trailers carrying the terminal status must both outlive each other.
@@ -461,6 +512,7 @@ impl Streaming {
             ready: Default::default(),
             ended: false,
             failed: None,
+            deadline,
         }
     }
 
@@ -479,7 +531,25 @@ impl Streaming {
             if self.ended {
                 return Ok(None);
             }
-            match self.body.next().await {
+            // Race the body against the call's deadline. Without this a server that
+            // sends headers and then stalls holds the caller forever: the request's
+            // `grpc-timeout` is advisory, and a stalled stream is precisely what it
+            // is advising about.
+            let chunk = {
+                use futures::future::{select, Either};
+                let body = &mut self.body;
+                match self.deadline.as_mut() {
+                    Some(timer) => match select(body.next(), timer).await {
+                        Either::Left((chunk, _)) => Some(chunk),
+                        Either::Right(((), _)) => None,
+                    },
+                    None => Some(body.next().await),
+                }
+            };
+            let Some(chunk) = chunk else {
+                return Err(self.fail(Status::new(Code::DeadlineExceeded, "deadline exceeded")));
+            };
+            match chunk {
                 Some(Ok(chunk)) => match self.deframer.push(&chunk) {
                     Ok(messages) => self.ready.extend(messages),
                     Err(status) => return Err(self.fail(status)),

@@ -351,3 +351,81 @@ minor one remains.
 The through-line: happy paths are well covered on both sides of the wire;
 almost every gap is a rejection or limit branch — exactly the branches that
 define protocol behavior for non-conforming or misconfigured clients.
+
+---
+
+## Rust client coverage audit — 2026-07-29
+
+Prompted by a plain question: does the Rust WASM client have the tests the TypeScript
+client has? Most of the TS suite does not apply — the Rust client is h2ts-only, one API
+flavor, no retry, so `json` / `ws-close-status` / `frame` / `transport-config` /
+`readable-stream` / `retry` / callback-vs-promise (~55 tests) have nothing to test
+against. Six areas did apply and were missing, and two of them were hiding bugs.
+
+### Drift
+
+1. **A streaming RPC with a deadline hung forever.** ✅ **Fixed** —
+   `server_streaming` / `bidi_streaming` called `request()` directly and never wrapped it
+   in `deadline()`, so `CallOptions::timeout` sent `grpc-timeout` and armed **no local
+   timer**. The server does not cover this either: its enforcement wraps
+   `routes.oneshot(req)`, which for a streaming RPC resolves as soon as the response
+   *headers* are ready — long before the body stalls. Two real mechanisms with the gap
+   exactly between them. One timer now spans the open and every message read, created once
+   and handed to `Streaming` still running rather than recomputed from a start instant
+   (`Instant::now()` panics on `wasm32-unknown-unknown`). Pinned by
+   `a_deadline_bounds_a_stream_that_stalls_after_it_opens` and
+   `the_stream_deadline_is_not_restarted_per_message`.
+
+   The TypeScript client has no h2ts-streaming deadline test either — it is correct only
+   because `createCallContext` folds the deadline into one `AbortSignal` that all four
+   cardinalities use. Same blind spot, different outcome.
+
+2. **Dropping a stream never reached the server.** ✅ **Fixed upstream in h2ts
+   (`h2ts-client` 0.1.3)** — `Drop for ResponseBody` returned the flow-control window and
+   sent no `RST_STREAM`, so every abandoned or timed-out streaming RPC left the server's
+   handler running. This contradicted a claim in this crate's own source ("the h2ts stream
+   is reset on drop, so the server learns about it"). The **TypeScript** `cancelBody()` had
+   the identical hole — the Rust port was faithful to an incomplete original — and was
+   fixed in the same commit, since h2ts forbids forking behavior between stacks. Its TS
+   client escaped the consequence only because it cancels via `AbortSignal` instead.
+
+3. **Two `web.rs` unit tests ran on no target at all.** ✅ **Fixed** — they sat behind
+   `#[cfg(target_arch = "wasm32")]`, so `cargo test` skipped them on the host and CI only
+   *builds* wasm. `websocket_url` is pure string handling; it moved to `src/url.rs`,
+   compiled everywhere, and grew cases for path-vs-authority and trailing slashes.
+
+4. **A deadline test that had quietly stopped isolating anything.** ✅ **Fixed** — once the
+   h2ts path started enforcing `grpc-timeout`, `a_deadline_is_enforced_locally_because_this
+   _path_has_no_server_timer` would have passed with the client's timer deleted outright:
+   the server cut the call either way. Renamed to what it now proves, and
+   `a_deadline_is_enforced_by_the_client_alone` isolates the client against a transport
+   that never answers.
+
+### Coverage added
+
+- **Backpressure** (`a_consumer_that_stops_reading_stops_the_server`) — documented in three
+  places, implemented by nobody, tested by nothing. Asserted from the *producing* side via
+  a local counting fixture, since "the client stopped receiving" proves nothing.
+- **Cancellation** (`dropping_a_stream_cancels_it_at_the_server`,
+  `a_deadline_releases_the_server_too`) — the pair that found drift 2.
+- **Trailers-only metadata** (`a_trailers_only_error_keeps_its_trailing_metadata`) — the
+  neighborhood a real bug has already been found in, on two implementations at once.
+- **Repeated reconnects** (`the_channel_keeps_recovering_across_repeated_cuts`) — a channel
+  that heals once and then latches passes the single-cut test.
+
+40 → 51 tests; workspace 142 → 153.
+
+### Recorded decisions
+
+- **No OK-path trailing-metadata test.** tonic offers no way to attach trailing metadata to
+  a successful unary response, so there is nothing to assert against; the Rust conformance
+  server records the same limitation ("no conformance case exercises OK-path trailers").
+  The error path, which is where servers actually put detail, is covered.
+- **Retry stays out**, as decided when the client was written. Unchanged by this audit.
+
+### Remaining gap
+
+The Rust client is **not in the conformance matrix** — every case runs against the Rust and
+Go servers, but the TypeScript client is the only driver. That is now the largest structural
+difference between the two clients, and a bigger one than any individual test above: the
+matrix is what catches cross-implementation drift, and one of the two clients is outside it.

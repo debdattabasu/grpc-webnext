@@ -42,6 +42,12 @@ stub layer yet: a service is a handful of thin wrappers over `unary`, `server_st
 header lets a server or proxy enforce the deadline, and the timer means the call still ends
 if nothing does.
 
+On a **stream** the deadline bounds the whole call, not just opening it. One timer spans
+the request and every message read after it, so a server that sends headers promptly and
+then goes quiet still ends the call — that being the case a deadline is actually for. When
+it fires the stream is dropped, which resets the HTTP/2 stream and releases the server's
+handler rather than leaving it producing for a caller that has gone.
+
 ## Backpressure
 
 Free, and real. `h2ts-client` replenishes the HTTP/2 receive window only as the response body

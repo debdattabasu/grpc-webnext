@@ -11,6 +11,7 @@
 //! Everything is `!Send` by design, so the whole test runs on a `LocalSet`.
 
 use std::cell::RefCell;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,6 +34,8 @@ use tonic::service::Routes;
 
 const UNARY: &str = "/echo.v1.Echo/Unary";
 const CHAT: &str = "/echo.v1.Echo/Chat";
+const HANG: &str = "/echo.v1.Echo/Hang";
+const REPEAT: &str = "/echo.v1.Echo/Repeat";
 
 /// Start the real server (native gRPC + grpc-webnext on one port) and return its URL.
 async fn start_server() -> String {
@@ -66,6 +69,106 @@ async fn start_server_with(svc: EchoSvc, seen: Option<Seen>) -> String {
     // The server lives as long as the test.
     std::mem::forget(handle);
     format!("http://{addr}")
+}
+
+/// A local `Echo` implementation for the two things `EchoSvc` cannot express, kept
+/// here rather than added to the shared fixture so no other test's behavior moves:
+///
+/// - `Repeat` counts the messages it has actually *produced*, which is how
+///   backpressure is observable at all — the proof is that the server stops
+///   generating, not merely that the client stops receiving.
+/// - `Unary` fails with trailing metadata attached, giving a trailers-only response
+///   that carries more than a status.
+#[derive(Clone, Default)]
+struct ProbeSvc {
+    produced: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[tonic::async_trait]
+impl testecho::pb::echo_server::Echo for ProbeSvc {
+    async fn unary(
+        &self,
+        _request: tonic::Request<EchoRequest>,
+    ) -> Result<tonic::Response<EchoResponse>, tonic::Status> {
+        let mut trailers = tonic::metadata::MetadataMap::new();
+        trailers.insert("x-detail", "quota-exhausted".parse().unwrap());
+        trailers.insert_bin(
+            "x-detail-bin",
+            tonic::metadata::MetadataValue::from_bytes(&[0, 1, 250]),
+        );
+        Err(tonic::Status::with_metadata(
+            tonic::Code::FailedPrecondition,
+            "no",
+            trailers,
+        ))
+    }
+
+    type RepeatStream =
+        Pin<Box<dyn futures::Stream<Item = Result<EchoResponse, tonic::Status>> + Send>>;
+
+    async fn repeat(
+        &self,
+        request: tonic::Request<testecho::pb::RepeatRequest>,
+    ) -> Result<tonic::Response<Self::RepeatStream>, tonic::Status> {
+        let testecho::pb::RepeatRequest { message, count } = request.into_inner();
+        let produced = self.produced.clone();
+        // `iter().map()` is lazy: the counter advances as the transport *pulls*,
+        // which is exactly the signal a backpressure test needs.
+        let output = futures::stream::iter(0..count).map(move |_| {
+            produced.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(EchoResponse { message: message.clone() })
+        });
+        Ok(tonic::Response::new(Box::pin(output)))
+    }
+
+    type StreamStream =
+        Pin<Box<dyn futures::Stream<Item = Result<EchoResponse, tonic::Status>> + Send>>;
+    async fn stream(
+        &self,
+        _: tonic::Request<tonic::Streaming<EchoRequest>>,
+    ) -> Result<tonic::Response<Self::StreamStream>, tonic::Status> {
+        unimplemented!("ProbeSvc only implements Unary and Repeat")
+    }
+    type ChatStream =
+        Pin<Box<dyn futures::Stream<Item = Result<EchoResponse, tonic::Status>> + Send>>;
+    async fn chat(
+        &self,
+        _: tonic::Request<tonic::Streaming<EchoRequest>>,
+    ) -> Result<tonic::Response<Self::ChatStream>, tonic::Status> {
+        unimplemented!("ProbeSvc only implements Unary and Repeat")
+    }
+    type HangStream =
+        Pin<Box<dyn futures::Stream<Item = Result<EchoResponse, tonic::Status>> + Send>>;
+    async fn hang(
+        &self,
+        _: tonic::Request<EchoRequest>,
+    ) -> Result<tonic::Response<Self::HangStream>, tonic::Status> {
+        unimplemented!("ProbeSvc only implements Unary and Repeat")
+    }
+    async fn sleep(
+        &self,
+        _: tonic::Request<testecho::pb::SleepRequest>,
+    ) -> Result<tonic::Response<EchoResponse>, tonic::Status> {
+        unimplemented!("ProbeSvc only implements Unary and Repeat")
+    }
+    async fn flaky_unary(
+        &self,
+        _: tonic::Request<EchoRequest>,
+    ) -> Result<tonic::Response<EchoResponse>, tonic::Status> {
+        unimplemented!("ProbeSvc only implements Unary and Repeat")
+    }
+}
+
+/// Start a server backed by [`ProbeSvc`], returning its URL and the produced-count.
+async fn start_probe_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let svc = ProbeSvc::default();
+    let produced = svc.produced.clone();
+    let (addr, handle) =
+        bind_and_serve_in_process(Routes::new(EchoServer::new(svc)), ServerConfig::default())
+            .await
+            .unwrap();
+    std::mem::forget(handle);
+    (format!("http://{addr}"), produced)
 }
 
 /// A connector that dials a **fresh** tunnel each time it is called, so the client
@@ -332,15 +435,13 @@ fn client_streaming_uploads_every_message() {
     });
 }
 
-/// The deadline is enforced *by the client*, and that is not a shortcut.
-///
-/// On the h2ts path the tunnel hands requests straight to a tonic `Routes`, and the
-/// piece of tonic that honors `grpc-timeout` lives in its own hyper server, which is
-/// not in this path — so nothing server-side stops the work. This test originally
-/// asserted the server would time out and caught that assumption: the 5-second sleep
-/// ran to completion and returned "awake".
+/// A deadline ends the call. Both halves are armed here — `with_timeout` sends
+/// `grpc-timeout` *and* starts a local timer — so this proves the feature end to end
+/// without isolating which half did it. `a_deadline_is_enforced_by_the_client_alone`
+/// isolates the client and `the_server_enforces_grpc_timeout_on_the_h2ts_path`
+/// isolates the server.
 #[test]
-fn a_deadline_is_enforced_locally_because_this_path_has_no_server_timer() {
+fn a_deadline_ends_a_call_that_would_otherwise_run_on() {
     run(async {
         let base = start_server().await;
         let client = connect_client(&base).await;
@@ -356,6 +457,110 @@ fn a_deadline_is_enforced_locally_because_this_path_has_no_server_timer() {
             .expect_err("the call should time out");
 
         assert_eq!(status.code, Code::DeadlineExceeded, "got {status}");
+    });
+}
+
+/// The client's own timer, with **nothing** on the other end to help it.
+///
+/// This matters because `CallOptions::timeout` promises two independent things, and
+/// only one of them is the server's. The test above cannot tell them apart: since
+/// the h2ts path started enforcing `grpc-timeout`, a server-side cut would satisfy
+/// it just as well, so it would keep passing if the local timer were deleted
+/// outright. Here the peer never answers anything — no SETTINGS, no response — so
+/// the only thing that can end the call is the client.
+#[test]
+fn a_deadline_is_enforced_by_the_client_alone() {
+    run(async {
+        // A transport that swallows everything and never replies: the h2ts handshake
+        // itself never completes.
+        let writer = futures::sink::drain().sink_map_err(|_: std::convert::Infallible| {
+            TransportError("unreachable".into())
+        });
+        let transport =
+            Transport::new(Box::pin(futures::stream::pending::<Vec<u8>>()), Box::pin(writer));
+        let (client, driver) =
+            Client::over_transport(transport, "black.hole", ConnectOptions::default());
+        tokio::task::spawn_local(driver);
+
+        let status = client
+            .unary(
+                UNARY,
+                EchoRequest { message: "x".into() }.encode_to_vec(),
+                CallOptions::new().with_timeout(Duration::from_millis(150)),
+            )
+            .await
+            .expect_err("nothing can answer this call");
+        assert_eq!(status.code, Code::DeadlineExceeded, "got {status}");
+    });
+}
+
+/// A deadline must bound a **stream**, not just its opening.
+///
+/// `Hang` sends one message and then never sends another, which is the shape a
+/// deadline exists for: headers arrive promptly, so anything that only bounded the
+/// open would call this a success and hand the caller a stream that never ends.
+///
+/// It hung forever before this was fixed, and neither side would have saved it. The
+/// client armed its timer only in the single-response path, so `server_streaming`
+/// and `bidi_streaming` sent `grpc-timeout` and started no timer at all. The server
+/// does enforce `grpc-timeout`, but only around producing the *response* — which for
+/// a streaming RPC resolves as soon as the headers are ready, long before the body
+/// stalls. Two mechanisms, both real, and the gap sat exactly between them.
+#[test]
+fn a_deadline_bounds_a_stream_that_stalls_after_it_opens() {
+    run(async {
+        let base = start_server().await;
+        let client = connect_client(&base).await;
+
+        let mut stream = client
+            .server_streaming(
+                HANG,
+                EchoRequest { message: "x".into() }.encode_to_vec(),
+                CallOptions::new().with_timeout(Duration::from_millis(300)),
+            )
+            .await
+            .expect("the stream opens promptly — that is the point");
+
+        let first = stream.message().await.expect("first message").expect("one message arrives");
+        assert_eq!(EchoResponse::decode(first.as_slice()).unwrap().message, "started");
+
+        // Now the server goes quiet forever. The deadline is the only way out.
+        let status = stream.message().await.expect_err("the deadline must end the stream");
+        assert_eq!(status.code, Code::DeadlineExceeded, "got {status}");
+        // ...and it stays ended, rather than resuming on the next poll.
+        assert_eq!(stream.status().code, Code::DeadlineExceeded);
+    });
+}
+
+/// The deadline spans the whole call, so time spent opening the stream is not
+/// refunded when the first message read begins.
+#[test]
+fn the_stream_deadline_is_not_restarted_per_message() {
+    run(async {
+        let base = start_server().await;
+        let client = connect_client(&base).await;
+
+        let started = std::time::Instant::now();
+        let mut stream = client
+            .server_streaming(
+                HANG,
+                EchoRequest { message: "x".into() }.encode_to_vec(),
+                CallOptions::new().with_timeout(Duration::from_millis(400)),
+            )
+            .await
+            .expect("the stream opens");
+        let _ = stream.message().await;
+        let status = stream.message().await.expect_err("deadline");
+        assert_eq!(status.code, Code::DeadlineExceeded);
+
+        // A timer restarted for the body would put this at open + 400ms, not 400ms.
+        // The margin is loose enough for a slow machine and tight enough to catch a
+        // restart, which would have to be at least a full extra timeout.
+        assert!(
+            started.elapsed() < Duration::from_millis(750),
+            "the deadline looks like it restarted: {:?}",
+            started.elapsed()
+        );
     });
 }
 
@@ -485,6 +690,142 @@ fn a_stream_that_fails_reports_the_status_not_a_clean_end() {
     });
 }
 
+/// Dropping a stream cancels it **at the server**, rather than leaving a handler
+/// running for a caller that has gone away.
+///
+/// This is load-bearing beyond tidiness: the deadline path stops work by dropping
+/// the call future, so if a drop did not reset the h2 stream, every timed-out RPC
+/// would leave the server working on a result nobody will read. `Hang` holds a guard
+/// that fires when its stream is dropped, so the signal comes from the server's own
+/// handler being torn down.
+#[test]
+fn dropping_a_stream_cancels_it_at_the_server() {
+    run(async {
+        let (svc, mut cancelled) = EchoSvc::with_cancel();
+        let base = start_server_with(svc, None).await;
+        let client = connect_client(&base).await;
+
+        let mut stream = client
+            .server_streaming(HANG, EchoRequest { message: "x".into() }.encode_to_vec(), CallOptions::new())
+            .await
+            .expect("the stream opens");
+        let first = stream.message().await.expect("no error").expect("one message");
+        assert_eq!(EchoResponse::decode(first.as_slice()).unwrap().message, "started");
+
+        assert!(cancelled.try_recv().is_err(), "not cancelled while the caller still holds it");
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_secs(5), cancelled.recv())
+            .await
+            .expect("the server was never told; the handler is still running")
+            .expect("cancel signal");
+    });
+}
+
+/// A timed-out call also releases the server, for the same reason: the deadline
+/// drops the call future, and that drop must reach the far end.
+#[test]
+fn a_deadline_releases_the_server_too() {
+    run(async {
+        let (svc, mut cancelled) = EchoSvc::with_cancel();
+        let base = start_server_with(svc, None).await;
+        let client = connect_client(&base).await;
+
+        let mut stream = client
+            .server_streaming(
+                HANG,
+                EchoRequest { message: "x".into() }.encode_to_vec(),
+                CallOptions::new().with_timeout(Duration::from_millis(200)),
+            )
+            .await
+            .expect("the stream opens");
+        let _ = stream.message().await;
+        assert_eq!(
+            stream.message().await.expect_err("deadline").code,
+            Code::DeadlineExceeded
+        );
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_secs(5), cancelled.recv())
+            .await
+            .expect("a timed-out call left the handler running")
+            .expect("cancel signal");
+    });
+}
+
+/// Backpressure is real, and this is the only thing that proves it.
+///
+/// The crate documents it in three places and implements none of it: `h2ts-client`
+/// replenishes the HTTP/2 receive window only as the body is polled, so a consumer
+/// that stops reading stops the *server*. A claim that costs no code is exactly the
+/// claim that silently stops being true, so it is pinned from the producing side —
+/// the server's own message count — rather than from what the client received.
+#[test]
+fn a_consumer_that_stops_reading_stops_the_server() {
+    run(async {
+        let (base, produced) = start_probe_server().await;
+        let client = connect_client(&base).await;
+
+        // 40 × 64 KiB = 2.5 MiB against h2ts's 1 MiB default per-stream window, so
+        // an unthrottled server would run to the end well inside the wait below.
+        const COUNT: u32 = 40;
+        let request = testecho::pb::RepeatRequest { message: "x".repeat(64 * 1024), count: COUNT };
+        let mut stream = client
+            .server_streaming(REPEAT, request.encode_to_vec(), CallOptions::new())
+            .await
+            .expect("the stream opens");
+
+        stream.message().await.expect("no error").expect("one message");
+
+        // Now stop reading. Nothing polls the body, so no WINDOW_UPDATE goes out.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let stalled = produced.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            (stalled as u32) < COUNT,
+            "the server produced all {COUNT} messages while the consumer was away — \
+             there is no backpressure on this path"
+        );
+
+        // Reading again releases it, so this is throttling and not a stall.
+        let mut seen = 1;
+        while stream.message().await.expect("no error").is_some() {
+            seen += 1;
+        }
+        assert_eq!(seen, COUNT as usize, "every message must still arrive, in the end");
+        assert_eq!(stream.status().code, Code::Ok);
+        assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), COUNT as usize);
+    });
+}
+
+/// A trailers-only error keeps its trailing metadata.
+///
+/// This is the neighborhood a real bug has already been found in — trailing metadata
+/// dropped on exactly this response shape, on two implementations at once. A failing
+/// call is also when metadata matters most, since it is where a server puts the
+/// detail that the status code has no room for.
+#[test]
+fn a_trailers_only_error_keeps_its_trailing_metadata() {
+    run(async {
+        let (base, _) = start_probe_server().await;
+        let client = connect_client(&base).await;
+
+        let status = client
+            .unary(UNARY, EchoRequest { message: "x".into() }.encode_to_vec(), CallOptions::new())
+            .await
+            .expect_err("ProbeSvc always fails this call");
+
+        assert_eq!(status.code, Code::FailedPrecondition);
+        assert_eq!(status.message, "no");
+        assert_eq!(
+            status.metadata.get("x-detail").map(|v| v.to_string()),
+            Some("quota-exhausted".to_string()),
+            "the status arrived without its trailing metadata"
+        );
+        // The `-bin` leg travels base64-encoded and must come back as raw bytes.
+        assert_eq!(status.metadata.get_bin("x-detail-bin"), Some(&[0u8, 1, 250][..]));
+    });
+}
+
 // --- reconnect: the channel contract ------------------------------------------------------
 
 #[test]
@@ -514,6 +855,34 @@ fn a_dropped_tunnel_is_redialed_on_the_next_call() {
             .expect("the next call must redial");
         assert_eq!(EchoResponse::decode(reply.message.as_slice()).unwrap().message, "after");
         assert_eq!(client.state(), ConnectivityState::Ready);
+    });
+}
+
+/// Recovery is not a one-shot. A channel that heals once and then latches — a
+/// consumed connector, a dial slot never cleared, a state machine that only leaves
+/// Idle in one direction — passes the single-cut test above and still strands an
+/// app on the second blip of the day.
+#[test]
+fn the_channel_keeps_recovering_across_repeated_cuts() {
+    run(async {
+        let base = start_server().await;
+        let relay = Relay::start(port_of(&base)).await;
+        let client = reconnecting_client(&relay.url());
+
+        for round in 0..4 {
+            let message = format!("round-{round}");
+            let reply = client
+                .unary(
+                    UNARY,
+                    EchoRequest { message: message.clone() }.encode_to_vec(),
+                    CallOptions::new(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("round {round} failed: {e}"));
+            assert_eq!(EchoResponse::decode(reply.message.as_slice()).unwrap().message, message);
+            assert_eq!(client.state(), ConnectivityState::Ready);
+            kill_tunnel(&relay, &client).await;
+        }
     });
 }
 

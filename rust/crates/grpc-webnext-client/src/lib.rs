@@ -36,6 +36,11 @@
 //! polled, so a consumer that stops reading stops the *server* rather than filling
 //! memory — the same property the TypeScript client gets, for the same reason.
 //!
+//! Dropping a [`Streaming`] cancels the RPC: the HTTP/2 stream is reset, so the
+//! server stops work it has no reader for. That is also how a deadline stops a
+//! stream, and why [`CallOptions::timeout`] covers a stream's whole lifetime rather
+//! than only its opening.
+//!
 //! The streaming cardinalities need `h2ts-client` **0.1.2**: at 0.1.1
 //! `Response::into_body` took `self` while `trailers()` needed `&self`, so a caller
 //! could stream the body or read the trailers, never both — and gRPC's terminal
@@ -64,6 +69,7 @@ mod codec;
 mod metadata;
 mod state;
 mod status;
+mod url;
 
 pub use client::{CallOptions, Client, Streaming, UnaryResponse};
 pub use client::Connector;
