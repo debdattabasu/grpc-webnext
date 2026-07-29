@@ -84,6 +84,24 @@ No reconnect **backoff**: as in tonic, a redial happens when a call asks for one
 call rate bounds the dial rate. A client built with `Client::over_transport` cannot redial —
 the transport is consumed — and says so instead of pretending to be live.
 
+## Bringing your own transport
+
+`connect` is the browser entry point and needs wasm. Anywhere else — a test, a CLI, a
+conformance driver — build the byte transport yourself and hand it to
+`Client::over_transport`. Everything the signature needs is re-exported here, so this does
+not mean depending on `h2ts-client` directly:
+
+```rust,ignore
+use grpc_webnext_client::{Client, ConnectOptions, Transport, TransportError};
+
+let transport = Transport::new(Box::pin(reader), Box::pin(writer));
+let (client, driver) = Client::over_transport(transport, "api.example.com", ConnectOptions::default());
+spawn_local(driver);   // the driver must be polled for anything to happen
+```
+
+Such a client is single-shot: the transport is consumed, so it cannot redial (see
+[Reconnect](#reconnect)).
+
 ## Testing
 
 The end-to-end tests run on the **host**, not in a browser. `h2ts-client` is a sans-I/O
@@ -91,6 +109,10 @@ engine behind a pluggable byte transport, so swapping `web_sys::WebSocket` for
 `tokio-tungstenite` exercises the identical code path against a real grpc-webnext server —
 framing, HPACK, flow control, trailers, all of it. What a browser adds is a socket
 implementation, not gRPC behavior.
+
+The repo's [`conformance-driver`](https://github.com/debdattabasu/grpc-webnext/tree/main/rust/examples/conformance-driver)
+is the same idea at a larger scale: it runs this client through the language-neutral
+conformance suite against every server implementation, over a real socket.
 
 ## License
 
