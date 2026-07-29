@@ -55,7 +55,7 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.12.1",
-    "@debdattabasu/h2ts": "0.1.1",
+    "@debdattabasu/h2ts": "0.1.2",
     "long": "^5.2.3"
   },
   "devDependencies": {

@@ -82,7 +82,19 @@ An executable that:
 3. Emits a report: one `PASS` / `FAIL` / `SKIP` per expanded case, with a diff on failure.
 
 The reference client driver is the **TS client** (`node/packages/client`), because it is
-the mature reference implementation; the **Rust client** gains a driver once it exists.
+the mature reference implementation. The **Rust client** has one too, as of 2026-07-29:
+`rust/examples/conformance-driver`, run from the same harness
+(`node/packages/client/test/conformance-rust-driver.test.ts`) against every server.
+
+```bash
+conformance-driver --base-url http://127.0.0.1:PORT --profile default conformance/cases/*.yaml
+```
+
+It covers the `proto/h2ts` profile only — the Rust client has no JSON codec and no custom
+`Frame` path, both deliberate — and reports everything else as SKIP **with a reason**. The two
+drivers share nothing but the YAML on disk: separate case parsers, separate matchers, separate
+clients. That is the point. A single driver cannot disagree with itself, so until there were
+two, a client-side misreading of the protocol had nothing to fail against.
 
 ## Server config profiles
 
@@ -115,6 +127,12 @@ Each case runs under every applicable **transport profile** — `proto/h2ts` (re
 the h2ts tunnel), `proto/ws` (the custom `Frame` path, unary over Fetch), and `json` (the
 custom path, Fetch + WS) — against **every server implementation**. 82 case×profile runs per
 server, Rust and Go, all green.
+
+The **Rust client driver** adds a second pass over the same cases: 18 of the 54 are within its
+reach (non-REST, proto codec), run against both servers. When adding a case, note that it joins
+the TS driver automatically and the Rust one only if it is neither REST nor json-only — the Rust
+harness asserts the exact number of cases it runs, so a case drifting out of that set fails
+rather than quietly shrinking the matrix.
 
 ### REST cases are different, on purpose
 

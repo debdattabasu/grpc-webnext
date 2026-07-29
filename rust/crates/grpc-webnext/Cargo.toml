@@ -30,7 +30,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 hyper-tungstenite = "0.20"
-h2ts-server = "0.1.1"
+h2ts-server = "0.1.3"
 bytes = "1"
 async-stream = "0.3"
 futures = "0.3"

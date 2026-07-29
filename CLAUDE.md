@@ -19,6 +19,8 @@ rust/           Cargo workspace  ← NOTE: the workspace is here, NOT the repo r
   crates/testecho/       test-only Echo service
   crates/devserver/      dev harness (testecho behind the proxy)
   examples/greeter-server/
+  examples/conformance-server/  serves ConformanceService over grpc-webnext
+  examples/conformance-driver/  Rust *client* driver for the conformance matrix
 node/           npm workspace
   packages/client/       @grpc-webnext/client (Fetch + WebSocket)  ✅
   packages/server/       @grpc-webnext/server (in-process)  ⬜ skeleton
@@ -149,7 +151,11 @@ hides.
 - `spec/PROTOCOL.md` is normative; `conformance/` is the cross-language anti-drift guard
   (run every server impl × every client driver over the real wire). It runs each case
   against the Rust **and** Go servers; a new impl is one entry in the `SERVERS` table in
-  `node/packages/client/test/conformance.test.ts`.
+  `node/packages/client/test/conformance.test.ts`. There are **two client drivers**: the TS
+  one (in that file) and the Rust one (`rust/examples/conformance-driver`, harnessed by
+  `conformance-rust-driver.test.ts`), which covers the `proto/h2ts` subset and SKIPs the rest
+  with a reason. They share nothing but the case YAML — separate parsers, separate matchers —
+  which is what makes them able to disagree.
 - **REST (`google.api.http`) is in the matrix** (`conformance/cases/rest.yaml`), driven by a
   *raw HTTP* client rather than the grpc-webnext one — the point of an annotated URL is that
   it needs no SDK. A `rest:` case runs once, not once per profile: the URL fixes the codec

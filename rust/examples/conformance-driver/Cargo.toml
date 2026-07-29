@@ -1,0 +1,22 @@
+[package]
+name = "conformance-driver"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "grpc-webnext conformance client driver (Rust): runs conformance/cases/*.yaml through grpc-webnext-client against any conformance server."
+
+[dependencies]
+grpc-webnext-client = { path = "../../crates/grpc-webnext-client" }
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+base64 = "0.22"
+futures = "0.3"
+# The client is `!Send` by design, so everything runs on a current-thread runtime
+# with a LocalSet — the same shape a browser gives it.
+tokio = { version = "1", features = ["macros", "rt", "time", "net"] }
+tokio-tungstenite = "0.24"
+
+[build-dependencies]
+prost-build = "0.14"

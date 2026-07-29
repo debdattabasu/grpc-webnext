@@ -78,9 +78,12 @@ pub use codec::{encode_message, Deframer};
 pub use metadata::{Metadata, MetadataValue};
 pub use status::{Code, Status};
 
-// Re-exported so callers can tune the tunnel without depending on h2ts-client
-// directly.
-pub use h2ts_client::{ConnectOptions, Transport};
+// Re-exported so callers can tune the tunnel — or supply their own — without
+// depending on h2ts-client directly. `TransportError` belongs here too: a caller
+// building a `Transport` has to name the error type its sink produces, so leaving it
+// out meant `Client::over_transport` could not be used without adding h2ts-client as
+// a second dependency.
+pub use h2ts_client::{ConnectOptions, Transport, TransportError};
 
 /// The WebSocket subprotocol an h2ts client offers.
 pub const H2TS_SUBPROTOCOL: &str = h2ts_client::DEFAULT_SUBPROTOCOL;

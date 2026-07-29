@@ -429,3 +429,37 @@ The Rust client is **not in the conformance matrix** — every case runs against
 Go servers, but the TypeScript client is the only driver. That is now the largest structural
 difference between the two clients, and a bigger one than any individual test above: the
 matrix is what catches cross-implementation drift, and one of the two clients is outside it.
+
+## Rust client joins the conformance matrix — 2026-07-29
+
+The audit above closed with the observation that the largest remaining difference between
+the two clients was not any single test: the TypeScript client was the matrix's **only**
+driver, so a client-side misreading of the protocol had nothing to disagree with. The Rust
+client now drives the matrix too (`rust/examples/conformance-driver`, harnessed by
+`node/packages/client/test/conformance-rust-driver.test.ts`).
+
+- **Coverage.** 18 of 54 cases are within the Rust client's reach — non-REST, proto codec —
+  run against **both** the Rust and Go servers. The remainder are reported SKIP with a
+  reason (`REST case…`, `json-only case…`), which the runner contract requires to be visible
+  rather than silently passed.
+- **Independence is the point.** The two drivers share nothing but the case YAML: separate
+  parsers, separate matchers, separate clients. A driver built on the other's plumbing would
+  agree with it by construction.
+- **The harness asserts how much ran, not just that it passed.** A driver that skipped
+  everything also exits 0 — the exact trap `conformance/README.md` documents. Each profile
+  pins its expected PASS count, verified by mutation: making the driver silently skip unary
+  cases turned three green tests red rather than shrinking the matrix quietly.
+- **The driver's own assertions were verified against a deliberately wrong case file** —
+  payload, status, `received_count`, missing trailer, message count — each failing with a
+  readable diff and a non-zero exit. A matcher that matches nothing is the other way a
+  conformance run lies.
+
+Found while building it: `grpc-webnext-client` re-exported `Transport` and `ConnectOptions`
+"so callers can tune the tunnel without depending on h2ts-client directly", but not
+`TransportError` — which a caller must name to build a `Transport` at all. So
+`Client::over_transport`, the only entry point on a non-wasm target, could not be used as
+documented without adding h2ts-client as a second dependency. The driver is the first
+consumer outside the crate's own tests, and it hit that immediately; now re-exported.
+
+Still TS-only: `proto/ws`, `json`, and REST. Those are not gaps in the matrix so much as the
+shape of the Rust client, which is deliberately h2ts-binary-only.
