@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "grpc-webnext"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-stream",
  "bytes",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "grpc-webnext-client"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64",
  "futures",
@@ -615,9 +615,9 @@ dependencies = [
 
 [[package]]
 name = "h2ts-server"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae487dcaf6fddabe1d3e0dcf415baed527030e7dcc0411fa54391e0a83483e61"
+checksum = "12e2fadfc71ac6dfeaacf1c3641128b1e15c9cbc639f4973d5d8cc728495d716"
 dependencies = [
  "base64",
  "bytes",
@@ -2363,9 +2363,9 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "wslay-sys"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a4d81603cb54a47498b1439bb525c70a3dabab4ae925867cbf73e1bc4c65e2c"
+checksum = "f0fb5ec32c9651af69f97458e65b553a4822d74eb89f7c774f3ac3f41478696a"
 dependencies = [
  "bindgen",
  "cc",

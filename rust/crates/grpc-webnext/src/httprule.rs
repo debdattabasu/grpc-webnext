@@ -13,13 +13,16 @@
 //!
 //! Two ideas carry most of the weight:
 //!
-//!   * **Captures are patterns, not segments.** [`Segment::Capture`] holds its own
+//!   (`Segment` and `set_from_json` below are private, so they are named here rather than
+//!   linked — this is a tour of the file, not of the public API.)
+//!
+//!   * **Captures are patterns, not segments.** `Segment::Capture` holds its own
 //!     sub-pattern, so `{f}`, `{f=**}` and `{f=shelves/*/books/*}` are one case
 //!     rather than three. Splitting is brace-aware for exactly that reason.
 //!   * **Conversions belong to the JSON decoder.** Anything without a scalar form —
 //!     `bytes`, the well-known types, a `body:` naming a non-message field — is set
 //!     by handing its protobuf-JSON text to the decoder rather than parsed here.
-//!     See [`set_from_json`].
+//!     See `set_from_json`.
 
 use prost_reflect::prost::Message;
 use prost_reflect::{

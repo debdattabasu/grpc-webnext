@@ -81,6 +81,56 @@ jobs:
         working-directory: rust
         run: cargo build -p grpc-webnext-client --target wasm32-unknown-unknown --locked
 
+  # The odd job out: it exists to reproduce the *docs.rs* build, because a green `rust` job is
+  # not evidence that docs.rs is green. grpc-webnext 0.1.1 published with a fully green CI and
+  # documented nowhere — its transitive wslay-sys compiled the vendored wslay C with implicit
+  # `htons`/`ntohs` declarations, which macOS and GCC <= 13 accept and newer GCC rejects.
+  docs:
+    name: rust — docs.rs parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # gcc-14 is the point of this job, not incidental setup: the runner's default is GCC 13,
+      # and wslay-sys compiles with warnings off (`-w`), so anything GCC 13 merely warns about
+      # is invisible to every other job. `-w` does not downgrade a default-on *error*, and on
+      # GCC 14+ -Wimplicit-function-declaration is one — so this has to be a real toolchain
+      # bump rather than an added flag. libclang is for wslay-sys's bindgen.
+      - name: Install GCC 14 + libclang (bindgen)
+        run: sudo apt-get install -y gcc-14 libclang-dev
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          # The client sets `docs.rs default-target = wasm32-unknown-unknown` — `connect` is
+          # wasm32-only, so a host build documents the crate without its entry point.
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          workspaces: rust
+          key: docs
+
+      # The two published crates, each documented for the target docs.rs documents it for.
+      # RUSTDOCFLAGS gates rustdoc itself too, so a broken intra-doc link fails here instead
+      # of quietly rendering as dead text on the published page.
+      - name: Doc the server crate
+        working-directory: rust
+        env:
+          CC: gcc-14
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked -p grpc-webnext
+
+      - name: Doc the client crate (wasm32, as docs.rs does)
+        working-directory: rust
+        env:
+          CC: gcc-14
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked -p grpc-webnext-client --target wasm32-unknown-unknown
+
   node:
     name: node — TS client + conformance matrix
     runs-on: ubuntu-latest

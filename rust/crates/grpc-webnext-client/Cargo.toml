@@ -1,9 +1,11 @@
 [package]
 name = "grpc-webnext-client"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Explicit for the same reason as the server crate's — see its comment.
+documentation = "https://docs.rs/grpc-webnext-client"
 description = "gRPC client for Rust WASM frontends, speaking real gRPC to a grpc-webnext endpoint over an h2ts WebSocket tunnel. No tonic, no hyper, no tokio."
 readme = "README.md"
 keywords = ["grpc", "wasm", "http2", "websocket", "frontend"]
@@ -12,6 +14,15 @@ categories = ["network-programming", "web-programming::http-client", "wasm"]
 # and `testecho` crates through path dev-dependencies — which cargo strips on publish. Keep it
 # out of the package rather than ship a test that cannot compile from a crates.io download.
 exclude = ["tests/"]
+
+# docs.rs defaults to x86_64-unknown-linux-gnu, where `connect` — the browser entry point, and
+# the only thing in the crate behind `cfg(target_arch = "wasm32")` — does not exist. That made
+# the rendered docs omit the crate's primary entry point *and* left `Client::from_connection`'s
+# link to it dangling. Nothing here is gated to non-wasm, so the wasm32 docs are a strict
+# superset: document that target alone rather than a host build the crate is not written for.
+[package.metadata.docs.rs]
+default-target = "wasm32-unknown-unknown"
+targets = []
 
 [features]
 default = ["prost"]
