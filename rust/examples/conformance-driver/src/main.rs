@@ -8,8 +8,16 @@
 //! itself.
 //!
 //! ```text
-//! conformance-driver --base-url http://127.0.0.1:PORT --profile default CASES...
+//! conformance-driver --base-url http://127.0.0.1:PORT --profile default [--stubs] CASES...
 //! ```
+//!
+//! Two modes over the same cases. The default drives the client's **native** API — a
+//! method path and message bytes, decoded by this crate's own `Deframer`, `Metadata`
+//! and `Status`. `--stubs` drives **tonic's generated stubs** over the client's
+//! `tonic` feature, so the response is decoded by tonic's codec, `MetadataMap` and
+//! `Status` instead. The crate can read a gRPC response two ways; running both
+//! against every server is what keeps the two readings honest. See `stubs.rs` for
+//! what that mode cannot assert, and why those are SKIPs rather than passes.
 //!
 //! Prints one `PASS` / `FAIL` / `SKIP` line per case, a summary, and exits non-zero
 //! if anything failed.
@@ -25,9 +33,11 @@
 
 mod cases;
 mod run;
+mod stubs;
 
-/// Generated conformance message types. Messages only — no service stubs: the client
-/// dispatches on a method path and deals in bytes, which is the whole interface.
+/// Generated conformance types: messages for both modes, plus the tonic client stubs
+/// the `--stubs` mode drives. The default mode uses neither — it dispatches on a
+/// method path and deals in bytes, which is the whole interface of the native client.
 mod pb {
     // The generated set covers the whole service, including the REST-only messages
     // this driver never builds.
@@ -47,24 +57,42 @@ use cases::{Case, SuiteFile};
 struct Args {
     base_url: String,
     profile: String,
+    /// Drive the cases through tonic's generated stubs rather than the native API.
+    stubs: bool,
     files: Vec<PathBuf>,
+}
+
+impl Args {
+    /// The label every report line carries, so a run is never ambiguous about which
+    /// client path produced it.
+    fn label(&self) -> &'static str {
+        if self.stubs {
+            "proto/h2ts+tonic"
+        } else {
+            "proto/h2ts"
+        }
+    }
 }
 
 fn parse_args() -> Args {
     let mut base_url = None;
     let mut profile = "default".to_string();
+    let mut stubs = false;
     let mut files = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--base-url" => base_url = it.next(),
             "--profile" => profile = it.next().expect("--profile needs a value"),
+            "--stubs" => stubs = true,
             other => files.push(PathBuf::from(other)),
         }
     }
     Args {
-        base_url: base_url.expect("usage: conformance-driver --base-url URL [--profile KEY] CASES..."),
+        base_url: base_url
+            .expect("usage: conformance-driver --base-url URL [--profile KEY] [--stubs] CASES..."),
         profile,
+        stubs,
         files,
     }
 }
@@ -108,7 +136,7 @@ async fn dial(base_url: &str) -> Result<Client, String> {
 }
 
 /// Why this driver cannot run a case, or `None` if it can.
-fn skip_reason(c: &Case, profile: &str) -> Option<String> {
+fn skip_reason(c: &Case, profile: &str, stubs: bool) -> Option<String> {
     if c.rest.is_some() {
         // Deliberate: a REST case is driven by a raw HTTP client, not a grpc-webnext
         // one — that is the claim being tested. Routing it through this client would
@@ -120,6 +148,10 @@ fn skip_reason(c: &Case, profile: &str) -> Option<String> {
     }
     if c.requires_key() != profile {
         return Some(format!("needs server profile {:?}, this run is {profile:?}", c.requires_key()));
+    }
+    if stubs {
+        // Reasons that belong to the tonic path alone, kept next to that runner.
+        return stubs::skip_reason(c);
     }
     None
 }
@@ -151,8 +183,9 @@ async fn drive(args: Args) -> usize {
     for suite in &suites {
         for c in &suite.cases {
             let id = format!("{}/{}", suite.suite, c.name);
-            if let Some(reason) = skip_reason(c, &args.profile) {
-                println!("SKIP {id} [proto/h2ts] — {reason}");
+            let label = args.label();
+            if let Some(reason) = skip_reason(c, &args.profile, args.stubs) {
+                println!("SKIP {id} [{label}] — {reason}");
                 skipped += 1;
                 continue;
             }
@@ -162,18 +195,24 @@ async fn drive(args: Args) -> usize {
             let client = match dial(&args.base_url).await {
                 Ok(c) => c,
                 Err(e) => {
-                    println!("FAIL {id} [proto/h2ts]\n      could not open the tunnel: {e}");
+                    println!("FAIL {id} [{label}]\n      could not open the tunnel: {e}");
                     failed += 1;
                     continue;
                 }
             };
-            let outcome = run::run_case(&client, c).await;
+            let outcome = if args.stubs {
+                stubs::run_case(&client, c).await
+            } else {
+                run::run_case(&client, c).await
+            };
+            // One matcher for both modes: a disagreement then means the transport path
+            // differed, not that two readings of the case file did.
             let fails = run::check(c, &outcome);
             if fails.is_empty() {
-                println!("PASS {id} [proto/h2ts]");
+                println!("PASS {id} [{label}]");
                 passed += 1;
             } else {
-                println!("FAIL {id} [proto/h2ts]");
+                println!("FAIL {id} [{label}]");
                 for f in &fails {
                     println!("      {f}");
                 }
@@ -182,6 +221,9 @@ async fn drive(args: Args) -> usize {
         }
     }
 
-    println!("\n{passed} passed, {failed} failed, {skipped} skipped  (rust client driver, proto/h2ts)");
+    println!(
+        "\n{passed} passed, {failed} failed, {skipped} skipped  (rust client driver, {})",
+        args.label()
+    );
     failed
 }

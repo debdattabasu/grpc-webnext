@@ -18,10 +18,19 @@ fn main() {
     println!("cargo:rerun-if-changed={SHARED_PROTO_DIR}/google/api/http.proto");
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    // Messages only — no tonic, no generated service stubs. The client dispatches on
-    // a method path string and deals in message bytes, so that is all it needs, and
-    // keeping `prost-build` alone here mirrors the client's own no-tonic constraint.
-    prost_build::Config::new()
+    // Messages **and** client stubs, because this driver has two modes. The default
+    // mode dispatches on a method path string and deals in message bytes — that is
+    // the whole interface of the native client, and it needs no stubs. `--stubs`
+    // drives the identical cases through tonic's generated stubs over the adapter, so
+    // the two readings of one wire are checked against the same servers.
+    //
+    // `build_transport(false)` for the reason every consumer needs it: the generated
+    // `connect()` constructor is over `tonic::transport::Channel`, which is hyper and
+    // TCP and does not exist on the target this client is written for.
+    tonic_prost_build::configure()
+        .build_client(true)
+        .build_server(false)
+        .build_transport(false)
         .out_dir(&out)
         .compile_protos(&[PROTO], &[PROTO_DIR, SHARED_PROTO_DIR])
         .expect("failed to compile conformance.proto");

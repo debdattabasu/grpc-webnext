@@ -36,33 +36,54 @@ impl Default for Outcome {
 
 // --- building the request ------------------------------------------------------------
 
-fn metadata_of(list: &Option<Vec<Metadatum>>) -> Metadata {
-    let mut md = Metadata::new();
-    for m in list.iter().flatten() {
+/// A metadata value, in neither client's vocabulary.
+pub enum Value {
+    Ascii(String),
+    Binary(Vec<u8>),
+}
+
+/// The request metadata a case asks for, in a vocabulary-neutral form.
+///
+/// Both runners build from this one parse — the native one into [`Metadata`], the
+/// stub one into a `tonic::metadata::MetadataMap`. Deliberate: if the two modes ever
+/// disagree about a case, it must be the transport path that differs and not what
+/// they decided to send.
+///
+/// Includes a raw `grpc-timeout` when the case asks the *server* to enforce the
+/// deadline. That is the whole point of `header_timeout_millis`: the header goes out
+/// and no local timer is armed, so only the server can end the call.
+pub fn request_metadata_pairs(c: &Case) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for m in c.request_metadata.iter().flatten() {
         match (&m.ascii, &m.b64) {
-            (Some(v), _) => {
-                md.insert(&m.key, v.clone());
-            }
+            (Some(v), _) => out.push((m.key.clone(), Value::Ascii(v.clone()))),
             (_, Some(b)) => {
                 use base64::Engine as _;
                 let raw = base64::engine::general_purpose::STANDARD
                     .decode(b)
                     .expect("case has invalid base64 metadata");
-                md.insert_bin(&m.key, raw);
+                out.push((m.key.clone(), Value::Binary(raw)));
             }
             _ => {}
         }
     }
-    md
+    if let Some(ms) = c.header_timeout_millis {
+        out.push(("grpc-timeout".to_string(), Value::Ascii(format!("{ms}m"))));
+    }
+    out
 }
 
-/// Request metadata, plus a raw `grpc-timeout` when the case asks the *server* to
-/// enforce the deadline. That is the whole point of `header_timeout_millis`: the
-/// header goes out and no local timer is armed, so only the server can end the call.
 fn request_metadata(c: &Case) -> Metadata {
-    let mut md = metadata_of(&c.request_metadata);
-    if let Some(ms) = c.header_timeout_millis {
-        md.insert("grpc-timeout", format!("{ms}m"));
+    let mut md = Metadata::new();
+    for (key, value) in request_metadata_pairs(c) {
+        match value {
+            Value::Ascii(v) => {
+                md.insert(&key, v);
+            }
+            Value::Binary(raw) => {
+                md.insert_bin(&key, raw);
+            }
+        }
     }
     md
 }
@@ -77,7 +98,9 @@ fn call_options(c: &Case) -> CallOptions {
     opts
 }
 
-fn response_definition(spec: Option<&ResponseDefinitionSpec>) -> Option<pb::ResponseDefinition> {
+/// A case's `response_definition`, for the first request of a stream or the only
+/// request of a unary call. Shared with the stub runner so both send the same thing.
+pub fn definition_of(spec: Option<&ResponseDefinitionSpec>) -> Option<pb::ResponseDefinition> {
     let s = spec?;
     Some(pb::ResponseDefinition {
         status_code: s.status_code.unwrap_or(0),
@@ -97,6 +120,11 @@ fn response_definition(spec: Option<&ResponseDefinitionSpec>) -> Option<pb::Resp
         delay_ms: s.delay_ms.unwrap_or(0),
         oversize_response_bytes: s.oversize_response_bytes.unwrap_or(0),
     })
+}
+
+/// The definition carried by a case's single `request` block.
+pub fn request_definition(request: Option<&crate::cases::Message>) -> Option<pb::ResponseDefinition> {
+    definition_of(request.and_then(|r| r.response_definition.as_ref()))
 }
 
 fn pb_metadata(list: &[Metadatum]) -> Vec<pb::Metadatum> {
@@ -131,9 +159,7 @@ pub async fn run_case(client: &Client, c: &Case) -> Outcome {
 async fn run_unary(client: &Client, c: &Case) -> Outcome {
     let request = pb::UnaryRequest {
         payload: c.request.as_ref().and_then(|r| r.payload.as_ref()).map(|p| p.to_vec()).unwrap_or_default(),
-        response_definition: response_definition(
-            c.request.as_ref().and_then(|r| r.response_definition.as_ref()),
-        ),
+        response_definition: request_definition(c.request.as_ref()),
     };
     match client.unary(&format!("{SERVICE}/Unary"), request.encode_to_vec(), call_options(c)).await {
         Ok(response) => Outcome {
@@ -153,9 +179,7 @@ async fn run_unary(client: &Client, c: &Case) -> Outcome {
 
 async fn run_server_stream(client: &Client, c: &Case) -> Outcome {
     let request = pb::ServerStreamRequest {
-        response_definition: response_definition(
-            c.request.as_ref().and_then(|r| r.response_definition.as_ref()),
-        ),
+        response_definition: request_definition(c.request.as_ref()),
     };
     let stream = client
         .server_streaming(&format!("{SERVICE}/ServerStream"), request.encode_to_vec(), call_options(c))
@@ -174,7 +198,7 @@ async fn run_client_stream(client: &Client, c: &Case) -> Outcome {
             pb::ClientStreamRequest {
                 payload: r.payload.as_ref().map(|p| p.to_vec()).unwrap_or_default(),
                 response_definition: if i == 0 {
-                    response_definition(r.response_definition.as_ref())
+                    definition_of(r.response_definition.as_ref())
                 } else {
                     None
                 },
@@ -220,7 +244,7 @@ async fn run_bidi_stream(client: &Client, c: &Case) -> Outcome {
             pb::BidiStreamRequest {
                 payload: r.payload.as_ref().map(|p| p.to_vec()).unwrap_or_default(),
                 response_definition: if i == 0 {
-                    response_definition(r.response_definition.as_ref())
+                    definition_of(r.response_definition.as_ref())
                 } else {
                     None
                 },

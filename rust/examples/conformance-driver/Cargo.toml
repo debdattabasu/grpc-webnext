@@ -7,7 +7,12 @@ publish = false
 description = "grpc-webnext conformance client driver (Rust): runs conformance/cases/*.yaml through grpc-webnext-client against any conformance server."
 
 [dependencies]
-grpc-webnext-client = { path = "../../crates/grpc-webnext-client" }
+# `tonic` for the --stubs mode: the same cases driven through tonic's *generated*
+# stubs over the adapter, so the tonic path is proven against every server rather
+# than only against the Rust one in the example crate's own tests.
+grpc-webnext-client = { path = "../../crates/grpc-webnext-client", features = ["tonic"] }
+tonic = { version = "0.14", default-features = false }
+tonic-prost = "0.14"
 prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
@@ -19,4 +24,4 @@ tokio = { version = "1", features = ["macros", "rt", "time", "net"] }
 tokio-tungstenite = "0.24"
 
 [build-dependencies]
-prost-build = "0.14"
+tonic-prost-build = "0.14"

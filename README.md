@@ -163,7 +163,7 @@ UPSTREAM=http://localhost:50051 LISTEN=127.0.0.1:8080 cargo run -p grpc-webnext-
 | Conformance suite | [`conformance/`](conformance/) | ✅ language-neutral cases × Rust **and** Go servers × TS driver, run over the real wire |
 | Go in-process server | [`go/webnext`](go/webnext) | ✅ h2ts, custom `Frame`, `+json`, REST, deadlines, cancel, size limits, native same-port |
 | Node in-process server | [`node/packages/server`](node/packages/server) | ⬜ skeleton |
-| Rust client (WASM / frontend)&nbsp;·&nbsp;[crates.io](https://crates.io/crates/grpc-webnext-client) | [`rust/crates/grpc-webnext-client`](rust/crates/grpc-webnext-client) | ✅ h2ts, all four cardinalities, deadlines, reconnect + connectivity — no tonic/hyper/tokio |
+| Rust client (WASM / frontend)&nbsp;·&nbsp;[crates.io](https://crates.io/crates/grpc-webnext-client) | [`rust/crates/grpc-webnext-client`](rust/crates/grpc-webnext-client) | ✅ h2ts, all four cardinalities, deadlines, reconnect + connectivity — no hyper/tokio, and tonic-free by default, with an optional feature that runs **tonic's own generated stubs** over the tunnel |
 
 > **Pre-1.0.** The Rust server/proxy, the Go server, and the TypeScript client are covered by
 > the conformance suite, which runs every case against both server implementations; the Node

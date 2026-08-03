@@ -380,27 +380,18 @@ impl Client {
         })
     }
 
-    /// Issue the request and wait for response headers. A trailers-only response —
-    /// how gRPC reports a call that failed before producing anything — becomes the
-    /// error here, so no caller has to special-case it.
-    async fn request(
+    /// Issue a request over the tunnel and wait for response headers, dialing (or
+    /// redialing) as needed. Nothing gRPC-shaped happens here — no framing, no status
+    /// — so this is also what the tonic adapter uses, and the reconnect behavior is
+    /// therefore one implementation rather than two.
+    pub(crate) async fn send(
         &self,
         path: &str,
+        headers: Vec<(String, String)>,
         body: RequestBody,
-        options: &CallOptions,
     ) -> Result<Response, Status> {
         let conn = self.tunnel().await?;
-        let mut headers = vec![
-            ("content-type".to_string(), CONTENT_TYPE.to_string()),
-            ("te".to_string(), "trailers".to_string()),
-        ];
-        if let Some(timeout) = options.timeout {
-            // `m` is milliseconds; never send 0, which would mean "already expired".
-            headers.push(("grpc-timeout".to_string(), format!("{}m", options_millis(timeout))));
-        }
-        headers.extend(options.metadata.to_headers());
-
-        let response = match conn
+        match conn
             .request(RequestInit {
                 method: Some("POST".to_string()),
                 path: Some(path.to_string()),
@@ -411,7 +402,7 @@ impl Client {
             })
             .await
         {
-            Ok(response) => response,
+            Ok(response) => Ok(response),
             Err(e) => {
                 // The call that discovers a dead tunnel reports the failure; dropping it
                 // here is what makes the *next* call redial. Same shape as tonic's
@@ -421,9 +412,31 @@ impl Client {
                 if conn.is_closed() {
                     self.forget(&conn);
                 }
-                return Err(Status::unavailable(format!("request failed: {e}")));
+                Err(Status::unavailable(format!("request failed: {e}")))
             }
-        };
+        }
+    }
+
+    /// Issue the request and wait for response headers. A trailers-only response —
+    /// how gRPC reports a call that failed before producing anything — becomes the
+    /// error here, so no caller has to special-case it.
+    async fn request(
+        &self,
+        path: &str,
+        body: RequestBody,
+        options: &CallOptions,
+    ) -> Result<Response, Status> {
+        let mut headers = vec![
+            ("content-type".to_string(), CONTENT_TYPE.to_string()),
+            ("te".to_string(), "trailers".to_string()),
+        ];
+        if let Some(timeout) = options.timeout {
+            // `m` is milliseconds; never send 0, which would mean "already expired".
+            headers.push(("grpc-timeout".to_string(), format!("{}m", options_millis(timeout))));
+        }
+        headers.extend(options.metadata.to_headers());
+
+        let response = self.send(path, headers, body).await?;
 
         if response.status != 200 {
             return Err(Status::unavailable(format!("HTTP {}", response.status)));

@@ -26,8 +26,16 @@
 //!
 //! The client deals in **message bytes**, so it is codec-agnostic: encode with
 //! `prost`, or anything else. The `prost` feature adds typed helpers over
-//! [`prost::Message`]; there is no generated service stub layer yet, so a service
-//! is a handful of thin wrappers over [`Client::unary`] and friends.
+//! [`prost::Message`], and a service is then a handful of thin wrappers over
+//! [`Client::unary`] and friends.
+//!
+//! ## Generated stubs
+//!
+//! For `greeter.say_hello(request)` instead of hand-written wrappers, the `tonic`
+//! feature lets **tonic's own generated stubs** run over the tunnel —
+//! `GreeterClient::new(client.into_tonic())`, all four cardinalities, nothing
+//! grpc-webnext-specific in the codegen. See [`tonic_service`], which also covers the
+//! one build-script setting a browser target needs.
 //!
 //! ## Streaming
 //!
@@ -82,8 +90,18 @@ pub use status::{Code, Status};
 // depending on h2ts-client directly. `TransportError` belongs here too: a caller
 // building a `Transport` has to name the error type its sink produces, so leaving it
 // out meant `Client::over_transport` could not be used without adding h2ts-client as
-// a second dependency.
-pub use h2ts_client::{ConnectOptions, Transport, TransportError};
+// a second dependency. `H2Connection` is here for the same reason one step up:
+// [`Connector`] is a function returning one, so a *reconnecting* client could not be
+// built without naming the type.
+pub use h2ts_client::{ConnectOptions, H2Connection, Transport, TransportError};
+
+/// Open an h2ts tunnel over a byte transport: the connection, plus the driver future
+/// the caller must poll for anything to happen.
+///
+/// This is `h2ts_client::connect`, re-exported because a [`Connector`] has to produce
+/// an [`H2Connection`] and there was otherwise no way to make one from here. In a
+/// browser prefer [`connect`], which builds the whole reconnecting client.
+pub use h2ts_client::connect as open_tunnel;
 
 /// The WebSocket subprotocol an h2ts client offers.
 pub const H2TS_SUBPROTOCOL: &str = h2ts_client::DEFAULT_SUBPROTOCOL;
@@ -97,3 +115,8 @@ pub use web::connect;
 mod typed;
 #[cfg(feature = "prost")]
 pub use typed::{TypedClient, TypedResponse};
+
+#[cfg(feature = "tonic")]
+pub mod tonic_service;
+#[cfg(feature = "tonic")]
+pub use tonic_service::{ResponseBody, TonicService};

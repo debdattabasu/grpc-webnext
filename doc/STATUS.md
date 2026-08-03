@@ -1,5 +1,23 @@
 # Protocol conformance status
 
+> **Note (2026-08-02):** the tonic-stub adapter (`grpc-webnext-client`'s `tonic` feature)
+> re-ran a failure mode this file already records, which is the interesting part. Building
+> the `tonic-stub-client` example — the second consumer of the crate from *outside* it —
+> immediately hit a missing re-export: `Client::with_connector` takes a function returning
+> an `H2Connection`, a type the crate never exported, so a **reconnecting** client could
+> not be built without adding `h2ts-client` as a second dependency. That is the same shape
+> as the `TransportError` gap the conformance driver found on 2026-07-30, one layer up, and
+> for the same reason: the crate's own tests are inside the crate, where every dependency
+> is in scope, so nothing in-tree can feel a hole in the public surface. The pattern is
+> worth naming — **a public API is only tested by a consumer that is not the author's test
+> module.** `H2Connection` and `open_tunnel` are now re-exported.
+>
+> The adapter itself found no server bug: it is a byte pipe over a path that was already
+> real HTTP/2, so there was nothing for it to get subtly wrong. What it does add is a
+> second, independent reading of the same wire — tonic's decoder rather than this crate's
+> `Deframer`, tonic's `Status` rather than this crate's — pinned by
+> `examples/tonic-stub-client/tests/e2e.rs` against a generated server over a real socket.
+
 > **Note (2026-07-29):** writing the **Rust WASM client** found a real server gap, and found
 > it the way the audit process expects — a test asserting the obvious thing and getting the
 > wrong answer. The h2ts path **received `grpc-timeout` and ignored it**: h2ts is a byte pipe

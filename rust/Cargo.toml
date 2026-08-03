@@ -8,6 +8,7 @@ members = [
     "examples/greeter-server",
     "examples/conformance-server",
     "examples/conformance-driver",
+    "examples/tonic-stub-client",
 ]
 
 [workspace.package]

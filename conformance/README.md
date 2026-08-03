@@ -96,6 +96,38 @@ drivers share nothing but the YAML on disk: separate case parsers, separate matc
 clients. That is the point. A single driver cannot disagree with itself, so until there were
 two, a client-side misreading of the protocol had nothing to fail against.
 
+#### The Rust driver's two modes (2026-08-02)
+
+`--stubs` runs the identical cases through **tonic's generated client stubs**, over
+`grpc-webnext-client`'s `tonic` feature, instead of the native path-and-bytes API:
+
+```bash
+conformance-driver --base-url http://127.0.0.1:PORT --profile default --stubs conformance/cases/*.yaml
+```
+
+The client crate can decode a gRPC response two ways — its own `Deframer` / `Metadata` /
+`Status`, or tonic's codec / `MetadataMap` / `Status` through the adapter — and only one of
+them was ever run against a server other than Rust's. Two readings of one wire are worth
+having only if something checks they still agree, so the harness runs both modes against
+every server and asserts they pass **the same cases**, not merely the same *number* of them.
+Report lines carry `[proto/h2ts]` or `[proto/h2ts+tonic]` so a run is never ambiguous about
+which path produced it.
+
+Unlike the two drivers, the modes deliberately **share the matcher and the case parser**.
+That is the opposite choice for the opposite reason: here the thing under test is the
+transport path, so anything else that differed would confound the comparison.
+
+One case is SKIPped in `--stubs` mode, and the reason is the interesting part.
+`deadline/unary/server-enforced` sends `grpc-timeout` as a raw header and arms no local
+timer, precisely so that only the *server* can end the call. The adapter deliberately does
+arm a local timer from that header, so through the stubs the client would always win the
+race and the case would pass whether or not the server did anything — the exact failure mode
+`doc/STATUS.md` records ("a case cannot test the server while the client is racing it").
+Also weaker in this mode: on a *successful* unary tonic merges trailing metadata into the
+response metadata, so `headers_contain` is checked against the union rather than the header
+block alone. The error path is unaffected — `Status::metadata()` is purely trailing
+metadata, and that is where this repo has actually had bugs.
+
 ## Server config profiles
 
 Some cases only make sense under a specific server configuration (`requires:` in a case).
@@ -128,10 +160,12 @@ the h2ts tunnel), `proto/ws` (the custom `Frame` path, unary over Fetch), and `j
 custom path, Fetch + WS) — against **every server implementation**. 82 case×profile runs per
 server, Rust and Go, all green.
 
-The **Rust client driver** adds a second pass over the same cases: 18 of the 54 are within its
-reach (non-REST, proto codec), run against both servers. When adding a case, note that it joins
-the TS driver automatically and the Rust one only if it is neither REST nor json-only — the Rust
-harness asserts the exact number of cases it runs, so a case drifting out of that set fails
+The **Rust client driver** adds a second and third pass over the same cases: 18 of the 54 are
+within its reach (non-REST, proto codec), run against both servers on the native path and 17
+of them again through tonic's generated stubs. When adding a case, note that it joins the TS
+driver automatically, the Rust native mode only if it is neither REST nor json-only, and the
+Rust stub mode only if it additionally sets no `header_timeout_millis` — the Rust harness
+asserts the exact number of cases each mode runs, so a case drifting out of either set fails
 rather than quietly shrinking the matrix.
 
 ### REST cases are different, on purpose

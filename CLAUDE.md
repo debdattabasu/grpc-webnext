@@ -21,6 +21,7 @@ rust/           Cargo workspace  ← NOTE: the workspace is here, NOT the repo r
   examples/greeter-server/
   examples/conformance-server/  serves ConformanceService over grpc-webnext
   examples/conformance-driver/  Rust *client* driver for the conformance matrix
+  examples/tonic-stub-client/   tonic's generated client stubs over the tunnel (+ e2e tests)
 node/           npm workspace
   packages/client/       @grpc-webnext/client (Fetch + WebSocket)  ✅
   packages/server/       @grpc-webnext/server (in-process)  ⬜ skeleton
@@ -35,8 +36,14 @@ go/             Go module github.com/grpc-webnext/grpc-webnext/go
 
 ```bash
 # Rust (server + proxy live in one crate). Run from rust/.
-cd rust && cargo test --workspace          # 101 tests
+cd rust && cargo test --workspace          # 175 tests
 cd rust && cargo clippy --workspace --all-targets   # keep clean
+
+# The client crate's `tonic` feature is off by default, but `examples/tonic-stub-client`
+# enables it — so a workspace build unifies it on and `--workspace` covers it. Building
+# that crate alone is also the standing check that the feature's dep set stays
+# wasm-shaped (minimal tonic, no hyper/TCP/TLS):
+cd rust && cargo check -p grpc-webnext-client --features tonic --target wasm32-unknown-unknown
 
 # TypeScript. Install from the npm workspace root (node/), NOT from a package — npm
 # resolves a member install to the root anyway, so node/package-lock.json is the one
@@ -155,7 +162,12 @@ hides.
   one (in that file) and the Rust one (`rust/examples/conformance-driver`, harnessed by
   `conformance-rust-driver.test.ts`), which covers the `proto/h2ts` subset and SKIPs the rest
   with a reason. They share nothing but the case YAML — separate parsers, separate matchers —
-  which is what makes them able to disagree.
+  which is what makes them able to disagree. The Rust driver has **two modes**: the native
+  path-and-bytes API, and `--stubs`, which runs the same cases through tonic's generated
+  stubs over the client's `tonic` feature. Those two deliberately *share* the parser and
+  matcher — the thing under test is the transport path, so anything else that differed would
+  confound the comparison — and the harness asserts they pass the same cases, not merely the
+  same number.
 - **REST (`google.api.http`) is in the matrix** (`conformance/cases/rest.yaml`), driven by a
   *raw HTTP* client rather than the grpc-webnext one — the point of an annotated URL is that
   it needs no SDK. A `rest:` case runs once, not once per profile: the URL fixes the codec

@@ -23,12 +23,23 @@ exclude = ["tests/"]
 [package.metadata.docs.rs]
 default-target = "wasm32-unknown-unknown"
 targets = []
+# `tonic` is off by default (it is a bundle-size decision, not a docs one), so without
+# this the rendered docs would omit the whole generated-stub story and the crate-level
+# link to it would dangle.
+all-features = true
 
 [features]
 default = ["prost"]
 # Typed request/response helpers over `prost::Message`. Without it the client
 # deals in raw message bytes and you bring your own codec.
 prost = ["dep:prost"]
+# Drive tonic's *generated* client stubs over the tunnel. Off by default: it puts
+# tonic in the dependency tree (and so in the wasm bundle), which the crate's own
+# API does not need. See `tonic_service`.
+# `tonic/codegen` is not for the adapter — it needs none of it — but for the stubs
+# the feature exists to run: generated client code opens with `use tonic::codegen::*`,
+# so without it every user meets the same confusing error before writing a line.
+tonic = ["dep:tonic", "tonic?/codegen", "dep:tower-service", "dep:http", "dep:http-body", "dep:bytes", "dep:send_wrapper"]
 
 [dependencies]
 # 0.1.2 for `Response::into_parts` — streaming a body while keeping the trailers
@@ -41,6 +52,21 @@ base64 = "0.22"
 percent-encoding = "2"
 futures-timer = "3"
 prost = { version = "0.14", optional = true }
+
+# --- the `tonic` feature ---------------------------------------------------------
+# `default-features = false` drops server, channel, router and TLS — none of which
+# build for wasm, and none of which this needs: the adapter is a byte pipe, and
+# tonic's client core (codec, metadata, status) is the only part it touches.
+tonic = { version = "0.14", default-features = false, optional = true }
+tower-service = { version = "0.3", optional = true }
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+# tonic's generated stubs bound `T::ResponseBody: Send`. The engine underneath is
+# `!Send` on purpose, so the bound is satisfied by a wrapper that asserts it with a
+# *runtime* thread check rather than an `unsafe impl` — one thread is what a browser
+# has, and anything else panics instead of racing. `futures` for its `Future` impl.
+send_wrapper = { version = "0.6", features = ["futures"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # futures-timer needs its wasm shim to reach setTimeout; without it a deadline

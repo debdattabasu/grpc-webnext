@@ -372,6 +372,55 @@ end-to-end. Remaining:
 - [x] ~~AbortSignal → WebSocket cancel~~ — `signal` now sends a `Reset` and locally
   terminates the stream with CANCELLED (deadline aborts report DEADLINE_EXCEEDED).
 
+### Rust WASM client: tonic's generated stubs — **done** (2026-08-02)
+
+The client's native API is a method path and message bytes, so a service was "a handful of
+thin wrappers the caller writes". The question was whether *standard* generated stubs could
+drive it instead. They could not: tonic's codegen emits `T: GrpcService<tonic::body::Body>`
+and bounds `T::ResponseBody: Send + 'static`, and this client is deliberately `!Send` with
+no `tower::Service` surface at all.
+
+Implemented behind an off-by-default `tonic` feature (`src/tonic_service.rs`). What made it
+cheap is the same property the whole h2ts pivot bought: **the path is real HTTP/2, so the
+adapter translates nothing** — request bytes out, response bytes plus headers and trailers
+back. tonic keeps codec, framing, status, compression and interceptors; the crate keeps
+dial, tunnel and reconnect. All four cardinalities, including the two grpc-web cannot
+express.
+
+Three decisions worth keeping:
+
+- **`Send` is satisfied by `send_wrapper`, not `unsafe impl`.** The bound is real and the
+  engine is honestly `!Send`; a runtime thread check panics at the boundary instead of
+  racing, and on wasm it cannot fire. Asserting `Send` unsafely would trade a compile error
+  for a data race.
+- **The error type is `tonic::Status`, not this crate's.** tonic downcasts it back out of
+  the boxed error, so a deadline arrives as DEADLINE_EXCEEDED rather than decaying to
+  UNKNOWN-with-the-text-in-the-message. Using the native `Status` would have looked correct
+  and lost every code.
+- **`grpc-timeout` is enforced locally**, a deliberate divergence from tonic over a
+  `Channel`, where `set_timeout` only sets the header. Same reasoning as
+  `CallOptions::timeout`: in a tab, a peer that ignores the header hangs the call forever.
+
+**Measured cost, since this is a frontend crate and "it ships in every visitor's bundle" is
+the standing objection to anything here:** ≈26 KB gzipped, and *flat* — the same for one
+unary method as for all four cardinalities, because what is paid for is tonic's core (codec,
+`Status`, `MetadataMap`, the decode state machine) and that does not tree-shake by
+cardinality. Same five RPCs, release profile, `wasm-bindgen` then `wasm-opt -Oz`: 68.4 KB
+gzipped on the native API, 94.6 KB through the stubs, against a 9.4 KB wasm-bindgen floor —
+so +44% on the gRPC layer itself. That is exactly why the feature is **off by default**
+rather than merely optional: the ergonomic path must be the one you opt into, not the one
+you have to notice and opt out of. The table is in the crate README.
+
+The build-script setting every consumer needs is `build_transport(false)` — otherwise the
+stub carries a `connect()` over `tonic::transport::Channel`, which does not compile for
+wasm32. Documented in the crate README, demonstrated in `examples/tonic-stub-client`, and
+pinned by that crate's `tests/e2e.rs` (generated server, generated client, real socket).
+
+Writing it also found a genuine API hole: `Client::with_connector` returns an
+`H2Connection` the crate never re-exported, so a *reconnecting* client could not be built
+without adding `h2ts-client` as a second dependency — contradicting what the README claimed
+about `over_transport`. `H2Connection` and `open_tunnel` are now re-exported.
+
 ### Rust WASM client: reconnect — **done**, retry — **declined** (2026-07-29)
 
 Reconnect was declined once and that was **wrong**, so the reasoning is worth keeping.
@@ -392,7 +441,10 @@ tonic: a redial happens when a call asks for one, so the call rate bounds the di
 
 - It is service-config policy, and this client has no stub layer to hang it on — a service
   is a few thin wrappers the caller writes. A policy engine would more than double the
-  surface of a client whose job is "frame bytes, read trailers".
+  surface of a client whose job is "frame bytes, read trailers". *(2026-08-02: there is a
+  stub layer now, via the `tonic` feature — but this argument survives the change intact,
+  because retry would then belong to **tonic's** stubs and not to this transport. The
+  other two grounds are untouched.)*
 - It ships in every visitor's wasm bundle.
 - It cannot replay a caller-owned request stream without buffering everything written —
   the same unbounded buffer declined on the response side under flow control.
