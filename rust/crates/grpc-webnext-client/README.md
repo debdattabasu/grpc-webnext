@@ -4,9 +4,9 @@ A gRPC client for **Rust WASM frontends** (Leptos, Yew, Dioxus, …), speaking r
 [grpc-webnext](https://github.com/debdattabasu/grpc-webnext) endpoint over an
 [h2ts](https://github.com/debdattabasu/h2ts) WebSocket tunnel.
 
-**No tonic, no hyper, no tokio.** The wire is real HTTP/2 — trailers, multiplexing, flow
-control — so there is nothing to translate: message framing plus a status read off the
-trailers is the whole client.
+**No hyper, no tokio — and no tonic unless you ask for it.** The wire is real HTTP/2 —
+trailers, multiplexing, flow control — so there is nothing to translate: message framing
+plus a status read off the trailers is the whole client.
 
 ```rust,ignore
 use grpc_webnext_client::{connect, CallOptions, TypedClient};
@@ -22,15 +22,25 @@ let reply: HelloReply = client
 All four cardinalities are supported. `Streaming::message()` yields responses as they
 arrive, and `Streaming::status()` gives the terminal status afterwards.
 
+Would rather write `greeter.say_hello(request)`? Turn on the
+[`tonic` feature](#generated-stubs-tonic) and tonic's own generated stubs drive the same
+tunnel.
+
+## Features
+
+| feature | default | what it adds |
+|---|:--:|---|
+| `prost` | ✅ | Typed helpers (`TypedClient`) over `prost::Message`. Without it the client deals in raw message bytes and you bring your own codec. |
+| `tonic` | — | Runs **tonic's generated client stubs** over the tunnel, via `Client::into_tonic`. Costs ≈26 KB gzipped — see [what it costs in the bundle](#what-it-costs-in-the-bundle). |
+
 ## Generated stubs (tonic)
 
-The native API above deals in method paths and message bytes. If you would rather call
-`greeter.say_hello(request)`, **tonic's own generated stubs run over the tunnel** — enable
-the `tonic` feature and pass the client where a `Channel` would go:
+The native API above deals in method paths and message bytes. Enable the `tonic` feature and
+pass the client where a `Channel` would go:
 
 ```toml
 [dependencies]
-grpc-webnext-client = { version = "0.1", features = ["tonic"] }
+grpc-webnext-client = { version = "0.2", features = ["tonic"] }
 # No server, no channel, no TLS — none of which build for wasm, and none of which this
 # needs. `codegen` comes with the feature above, since generated code opens with
 # `use tonic::codegen::*`.
@@ -73,13 +83,16 @@ status, compression and interceptors; this crate keeps doing what tonic cannot d
 browser: dial, tunnel, reconnect. **All four cardinalities work**, including the two
 (client- and bidi-streaming) that grpc-web cannot express at all.
 
+A runnable end-to-end example is
+[`tonic-stub-client`](https://github.com/debdattabasu/grpc-webnext/tree/main/rust/examples/tonic-stub-client).
+
 Three things differ from tonic over a `Channel`, all of them deliberate:
 
 - **`Request::set_timeout` is enforced locally**, not only sent as `grpc-timeout`, and it
   covers the whole call including a stream that stalls after it opens. On a `Channel` the
   header is advisory and only an `Endpoint::timeout` layer enforces anything; in a tab, a
   peer that ignores the header would hang the call forever. Same promise as
-  [`CallOptions::timeout`](#deadlines) on the native API.
+  `CallOptions::timeout` on the native API — see [Deadlines](#deadlines).
 - **The client stays single-threaded.** tonic's stubs require `T::ResponseBody: Send`, and
   the engine underneath is `!Send` on purpose — see below.
 - **There is no `connect()` constructor**, which is what `build_transport(false)` removes.
@@ -92,29 +105,30 @@ deliberately `!Send` (`Rc`, boxed non-`Send` streams), which is what a browser a
 so asserting `Send` with an `unsafe impl` would be a lie the compiler could no longer
 check. The adapter uses [`send_wrapper`](https://docs.rs/send_wrapper) instead: it carries
 the value across the bound and records the thread that created it, so a value that really
-does move threads **panics at the boundary** rather than racing. Natively, keep the client
-on a `LocalSet` — where a `!Send` client belongs anyway.
+does move threads **panics at the boundary** rather than racing. Exactly one type is wrapped
+— the response body — because tonic bounds the body and never the future, which it awaits
+inline. Natively, keep the client on a `LocalSet`, where a `!Send` client belongs anyway.
 
 **`Send` is a compile-time marker, not a runtime.** Requiring it links nothing and spawns
-nothing, and this feature brings no threading with it — which matters, because a wasm
-bundle that quietly needed shared memory would not run where you want to ship it. In a
-release build of the stub path:
+nothing, and this feature brings no threading with it — which matters, because a wasm bundle
+that quietly needed shared memory would not run where you want to ship it. In a release
+build of the stub path:
 
 - **zero atomic instructions** and no shared memory — threads on wasm require both;
 - no `thread::spawn` / `tokio::spawn` / `JoinHandle` symbols anywhere;
 - `tokio` resolves to `default,sync` only. `tokio::spawn` lives behind the `rt` feature,
-  which is off, so the code path *cannot* spawn a task — that is a compile-time property,
-  not an observation about this build.
+  which is off, so the code path *cannot* spawn a task — a compile-time property, not an
+  observation about one build.
 
 `send_wrapper` itself is a `ThreadId` comparison, not a threading primitive, and it was
 already in the tree before this feature existed (`futures-timer` pulls it in for its
 wasm-bindgen shim). Plain `wasm32-unknown-unknown` — no `+atomics` — is the supported and
 measured configuration.
 
-If you *do* build with wasm threads, the rule is **one client per worker**: a `Client`
-moved across workers panics at the `SendWrapper` boundary, deliberately, because the
-alternative is a data race on `Rc`. Per-worker clients are the right shape regardless —
-each worker gets its own tunnel.
+If you *do* build with wasm threads, the rule is **one client per worker**: a `Client` moved
+across workers panics at the `SendWrapper` boundary, deliberately, because the alternative
+is a data race on `Rc`. Per-worker clients are the right shape regardless — each worker gets
+its own tunnel.
 
 ### What it costs in the bundle
 
@@ -130,10 +144,16 @@ and so in the wasm bundle. Measured, rather than guessed — same five RPCs, rel
 | native API, all four cardinalities | 158.0 KB | 68.4 KB |
 | tonic stubs, all four cardinalities | 221.0 KB | **94.6 KB** |
 
-**≈26 KB gzipped**, and note it is *flat*: the same whether you call one unary method or
-all four cardinalities. What you are paying for is tonic's core — codec, `Status`,
-`MetadataMap`, the decode state machine — which does not tree-shake away by cardinality. As
-a share of the gRPC layer (bundle minus the floor) it is +44%.
+**≈26 KB gzipped**, and note it is *flat*: the same whether you call one unary method or all
+four cardinalities. What you are paying for is tonic's core — codec, `Status`, `MetadataMap`,
+the decode state machine — which does not tree-shake away by cardinality. As a share of the
+gRPC layer (bundle minus the floor) it is +44%.
+
+What you are *not* paying for is two clients. With the feature on and only stubs in use, LTO
+drops this crate's own framing, metadata and status handling entirely — the feature swaps
+one reading of the wire for the other rather than stacking them. Nor does it drag in a
+server stack: `default-features = false` gates out `transport`, `server`, `channel` and TLS,
+so there is no hyper, h2, axum, socket2 or rustls anywhere in the tree.
 
 Worth it for the ergonomics and for interop with tonic's ecosystem; not worth it if bytes
 are the binding constraint. Both APIs are here precisely so that stays your call — with the
@@ -142,9 +162,9 @@ feature off, nothing above changes and the client is tonic-free.
 ## Codec
 
 The client deals in **message bytes**, so it is codec-agnostic. The default `prost` feature
-adds typed helpers ([`TypedClient`]) over `prost::Message`, and a service is then a handful
-of thin wrappers over `unary`, `server_streaming`, `client_streaming` and `bidi_streaming`.
-For generated stubs instead of hand-written wrappers, see
+adds typed helpers (`TypedClient`) over `prost::Message`, and a service is then a handful of
+thin wrappers over `unary`, `server_streaming`, `client_streaming` and `bidi_streaming`. For
+generated stubs instead of hand-written wrappers, see
 [Generated stubs](#generated-stubs-tonic).
 
 ## Deadlines
@@ -227,7 +247,8 @@ implementation, not gRPC behavior.
 
 The repo's [`conformance-driver`](https://github.com/debdattabasu/grpc-webnext/tree/main/rust/examples/conformance-driver)
 is the same idea at a larger scale: it runs this client through the language-neutral
-conformance suite against every server implementation, over a real socket.
+conformance suite against every server implementation, over a real socket — **both** its
+paths, native and tonic stubs, with the harness asserting the two agree case for case.
 
 ## License
 

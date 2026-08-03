@@ -4,11 +4,15 @@
 //! [grpc-webnext](https://github.com/debdattabasu/grpc-webnext) endpoint over an
 //! [h2ts](https://github.com/debdattabasu/h2ts) WebSocket tunnel.
 //!
-//! **No tonic, no hyper, no tokio.** The wire is real HTTP/2 — trailers,
-//! multiplexing, flow control — so there is nothing to translate: framing plus a
-//! status read off the trailers is the whole client. Everything is single-threaded
-//! (`Rc`, `!Send`), which is what a browser actually is; nothing here asserts
-//! `Send` to satisfy a runtime that does not exist on this target.
+//! **No hyper, no tokio — and no tonic unless you ask for it.** The wire is real
+//! HTTP/2 — trailers, multiplexing, flow control — so there is nothing to translate:
+//! framing plus a status read off the trailers is the whole client. Everything is
+//! single-threaded (`Rc`, `!Send`), which is what a browser actually is; nothing here
+//! asserts `Send` to satisfy a runtime that does not exist on this target.
+//!
+//! The optional `tonic` feature runs tonic's *generated* stubs over the same tunnel —
+//! see [Generated stubs](#generated-stubs). It is off by default because it is not
+//! free (≈26 KB gzipped); with it off, this crate has no tonic in its tree at all.
 //!
 //! ```no_run
 //! # async fn demo(client: grpc_webnext_client::Client) -> Result<(), grpc_webnext_client::Status> {
