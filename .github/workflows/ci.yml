@@ -124,12 +124,19 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --locked -p grpc-webnext
 
-      - name: Doc the client crate (wasm32, as docs.rs does)
+      # `--all-features` is not optional here, and not a convenience: the client crate's
+      # `[package.metadata.docs.rs]` sets `all-features = true`, so a build without it is
+      # documenting a *different* crate than the published page — missing every item behind
+      # the `tonic` feature, and reporting the crate-level link to them as broken. Both
+      # flags mirror that metadata block; change one and change the other, or this job stops
+      # being the parity check its name claims and goes back to being a build that merely
+      # passes. That is exactly how 0.1.1 shipped undocumented under a green CI.
+      - name: Doc the client crate (wasm32 + all features, as docs.rs does)
         working-directory: rust
         env:
           CC: gcc-14
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --locked -p grpc-webnext-client --target wasm32-unknown-unknown
+        run: cargo doc --no-deps --locked --all-features -p grpc-webnext-client --target wasm32-unknown-unknown
 
   node:
     name: node — TS client + conformance matrix
